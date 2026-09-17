@@ -44,23 +44,22 @@ agent/session-start（startup / resume / clear / compact）
   ├─ 预算封顶：单文件 64KB（超限截断并标注）/ 总量 128KB（超限省略并标注）
   │    缺失文件只记一行提示，不报错
   │
-  ├─ 单份不变量：扫描持久历史，任何事件形态下检测到已有注入 → 跳过
-  │    （注入消息以 agent/inbox/spliced 事件落库，按 source 标签 +
-  │     中/英包装指纹三重匹配；compact 真正压掉旧块后会自动重注）
+  ├─ 单份不变量：全量事件日志指纹检测，已有注入 → 跳过；
+  │    compact 真正压掉旧块后 → 自动重注续命
   │
-  └─ agent.inject() 注入一条 <system-reminder> 上下文消息（官方推荐通道）
+  └─ pre-step 定位插入：排在 AGENTS.md / skill 目录等全部上下文注入之后、
+       用户消息之前；<system-reminder> 内只有 <file path="…"> 块与状态行，
+       零引导废话；包装可用 template 自定义
 ```
-
-包装文本语言解析链：用户显式语言偏好 → 浏览器实际解析语言（client 半自动同步）→ 英文兜底；也可用 `template` 完全自定义（`{{content}}` 占位）。
 
 ## 特性
 
 - **Claude Code 式 @import**：`AGENTS.md` 里写 `@04_MEMORY/INDEX.md`，会话开始模型就"已经读过"它——不再依赖 Agent 自觉执行启动读取（那个假设已被证明不可靠）。
 - **四场景触发，全部可配**：新会话 / 恢复 / 清空 / 压缩后。压缩续命是刻意设计——长会话压缩后状态文件自动回场。
-- **单份注入不变量**：对持久会话日志做了事件形态核验（注入以 `agent/inbox/spliced` 事件落库而非 `user/message`），检测跨形态三重匹配；任何场景下活跃上下文最多一份。
+- **单份注入不变量**：对持久会话日志做了事件形态核验（注入消息双形态落库：`agent/inbox/spliced` 与 `user/message`），检测按全量日志指纹匹配，与落库形态无关；任何场景下活跃上下文最多一份。
 - **六语言设置卡片**：设置 → Plugins → Plugin configuration 图形化编辑全部配置；界面文案中/英/日/法/俄/韩，跟随宿主语言实时切换。
 - **预算与兜底**：单文件/总量双预算、缺失文件降级为提示行、围栏代码块内的 `@` 不误判、环引用去重。
-- **纯官方 API**：cordis 事件 + `agent.inject()`/`createUserMessage`（dsh-llm）+ schemastery Config + dsh-settings `installSection`（可选服务，缺失时按组合配置照常工作）。不依赖任何其他功能插件。
+- **纯官方 API**：cordis 事件（`agent/session-start` + `agent/pre-step`）+ `createUserMessage`（dsh-llm）+ schemastery Config + dsh-settings `installSection`（可选服务，缺失时按组合配置照常工作）。不依赖任何其他功能插件。
 
 ## 配置
 

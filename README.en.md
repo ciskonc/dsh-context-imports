@@ -30,7 +30,8 @@
 ## How it works
 
 ```text
-agent/session-start (startup / resume / clear / compact)
+agent/session-start (startup / resume / clear / compact) → scene ledger
+agent/pre-step (every step) → injection decision
   ├─ read config (settings-card edits apply live, no reload)
   ├─ scan instruction files (default AGENTS.md / CLAUDE.md) for @path imports
   │    ├─ fenced code blocks skipped; extensions required
@@ -39,23 +40,21 @@ agent/session-start (startup / resume / clear / compact)
   ├─ merge explicit `files` (injected in full; instruction files are scan-only)
   ├─ budgets: 64KB per file (truncated + noted) / 128KB total (omitted + noted);
   │    missing files degrade to a one-line note
-  ├─ single-injection invariant: prior injections detected across event shapes
-  │    are skipped (messages persist as agent/inbox/spliced events, matched by
-  │    source tag + zh/en wrapper fingerprints); compaction that removed the
-  │    old block makes the session injectable again
-  └─ one <system-reminder> context message via agent.inject() (official channel)
+  ├─ single-injection invariant: full-log fingerprint scan; a prior injection
+  │    is skipped, compaction that removed the old block re-enables injection
+  └─ pre-step placement: after every context injection (AGENTS.md, skill
+       catalog, …) and right before the user message; the <system-reminder>
+       holds only <file path="…"> blocks and status lines — no filler prose
 ```
-
-Wrapper language: explicit locale preference → browser-resolved language (synced by the client half) → English fallback; fully overridable via the `template` option (`{{content}}` placeholder).
 
 ## Features
 
 - **Claude Code-style @imports** — write `@04_MEMORY/INDEX.md` in AGENTS.md and the model has "already read it" at turn one; no reliance on the agent remembering to run startup reads.
 - **Four trigger scenes, all configurable** — startup / resume / clear / compact. Compaction re-seed is intentional.
-- **Single-injection invariant** — verified against live session logs: injections persist as `agent/inbox/spliced` events (not `user/message`); detection matches across shapes via source tag and zh/en wrapper fingerprints.
+- **Single-injection invariant** — verified against live session logs: injections persist in TWO durable shapes (`agent/inbox/spliced` and `user/message`); detection fingerprint-scans the full event log regardless of shape.
 - **Six-language settings card** — edit every option graphically under Settings → Plugins → Plugin configuration; UI copy in zh/en/ja/fr/ru/ko.
 - **Budgets & fallbacks** — per-file/total byte caps, missing-file notes, code-fence awareness, cycle-safe dedupe.
-- **Official API only** — cordis events, `agent.inject()` + `createUserMessage` (dsh-llm), schemastery Config, dsh-settings `installSection` (optional service). Zero feature-plugin dependencies.
+- **Official API only** — cordis events (`agent/session-start` + `agent/pre-step`), `createUserMessage` (dsh-llm), schemastery Config, dsh-settings `installSection` (optional service). Zero feature-plugin dependencies.
 
 ## Configuration
 

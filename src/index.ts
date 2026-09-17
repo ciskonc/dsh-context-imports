@@ -57,13 +57,12 @@ export const Config = z.object({
 })
 
 /* ------------------------------------------------------------------ *
- * Locale wrappers (model-facing). The host has no official i18n API,
- * so we keep a small dictionary here and follow the UI locale
- * preference stored in the official `locale` settings namespace.
+ * Locale status words (model-facing). No intro prose: the
+ * <system-reminder> wrapper and <file path> tags carry the structure;
+ * only the truncation/missing/omitted status lines are localized.
  * ------------------------------------------------------------------ */
 
 interface Wrapper {
-  intro: string
   truncated: string
   missing: string
   omitted: string
@@ -71,37 +70,31 @@ interface Wrapper {
 
 const WRAPPERS: Record<string, Wrapper> = {
   en: {
-    intro: 'The following workspace files were referenced via @imports (or explicitly configured) and are injected at session start by dsh-context-imports. Treat them as durable context for this session.',
     truncated: 'truncated at',
     missing: 'referenced but not found',
     omitted: 'omitted: total byte budget reached',
   },
   zh: {
-    intro: '以下工作区文件由 dsh-context-imports 在会话启动时注入（来自 @import 引用或显式配置），请将其作为本会话的持久上下文对待。',
     truncated: '已截断于',
     missing: '被引用但文件不存在',
     omitted: '已省略：超出总字节预算',
   },
   ja: {
-    intro: '以下のワークスペースファイルは dsh-context-imports によりセッション開始時に注入されました（@import 参照または明示的な設定より）。このセッションの永続コンテキストとして扱ってください。',
     truncated: 'バイト数で切り詰め:',
     missing: '参照されていますが見つかりません',
     omitted: '省略: 合計バイト予算に達しました',
   },
   fr: {
-    intro: 'Les fichiers d’espace de travail suivants ont été injectés au démarrage de la session par dsh-context-imports (références @imports ou configuration explicite). Traitez-les comme un contexte durable pour cette session.',
     truncated: 'tronqué à',
     missing: 'référencé mais introuvable',
     omitted: 'omis : budget total d’octets atteint',
   },
   ru: {
-    intro: 'Следующие файлы рабочей области внедрены при старте сессии плагином dsh-context-imports (ссылки @imports или явная настройка). Считайте их постоянным контекстом этой сессии.',
     truncated: 'обрезано на',
     missing: 'указан, но не найден',
     omitted: 'пропущено: достигнут общий лимит байт',
   },
   ko: {
-    intro: '다음 워크스페이스 파일들은 dsh-context-imports에 의해 세션 시작 시 주입되었습니다(@import 참조 또는 명시적 설정). 이 세션의 영구 컨텍스트로 취급하세요.',
     truncated: '다음 바이트에서 잘림:',
     missing: '참조되었지만 찾을 수 없음',
     omitted: '생략됨: 전체 바이트 예산 도달',
@@ -236,7 +229,7 @@ function renderBundle(cfg: Config, bundle: Bundle, wrapper: Wrapper): string | u
     const body = template.includes('{{content}}') ? template.replaceAll('{{content}}', content) : `${template}\n\n${content}`
     return `<system-reminder>\n${body}\n</system-reminder>`
   }
-  return `<system-reminder>\n${wrapper.intro}\n\n${content}\n</system-reminder>`
+  return `<system-reminder>\n${content}\n</system-reminder>`
 }
 
 /* ------------------------------------------------------------------ *
@@ -305,10 +298,11 @@ function hasExistingInjection(agent: AgentLike): boolean {
   try {
     const session = agent.session
     if (typeof session.snapshotEvents === 'function') {
+      // No type pre-filter: the durable shape of a pre-step-injected message
+      // differs from the inbox path, so match on fingerprints only. One full
+      // pass per process (cached snapshot, WeakSet ledger afterwards).
       const events = session.snapshotEvents.call(session)
       for (const event of events) {
-        const type = (event as { type?: string } | undefined)?.type
-        if (type !== 'agent/inbox/spliced' && type !== 'user/message') continue
         let raw: string
         try {
           raw = JSON.stringify(event)
@@ -364,36 +358,68 @@ export function apply(ctx: Context, entry: Config): void {
     // No settings service in this profile: run on composition config only.
   }
 
-  ctx.on('agent/session-start', async (payload: { agent: AgentLike; source: string }) => {
+  // Which session-start scene fired last, per session. `agent/pre-step` has no
+  // scene concept, so the session-start listener records it and the pre-step
+  // listener consults it against `injectOn`.
+  const lastScene = new WeakMap<object, string>()
+
+  ctx.on('agent/session-start', (payload) => {
+    const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
+    if (scene === undefined) return
+    if (scene === 'compact') injectedSessions.delete(payload.agent.session)
+    lastScene.set(payload.agent.session, scene)
+  })
+
+  // Injection happens as a pre-step waterfall: we place the message ourselves
+  // right before the first user message — i.e. after every context injection
+  // (AGENTS.md, skill catalog, …) — instead of letting the inbox path put it
+  // on top of everything.
+  ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    const session = agent.session
+    const scene = lastScene.get(session)
     const cfg = sourceOf()
-    const source = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
-    if (source === undefined || !cfg.injectOn.includes(source)) return
+    if (scene === undefined || !cfg.injectOn.includes(scene)) return decision
     // Single invariant: at most one injection alive in the active history.
-    // Process-local ledger guards the window before the first message is
-    // persisted; compaction clears it so the history scan alone decides —
-    // old block still present → skip, removed by compaction → re-inject.
-    if (source === 'compact') injectedSessions.delete(payload.agent.session)
-    if (injectedSessions.has(payload.agent.session) || hasExistingInjection(payload.agent)) {
-      ctx.logger.info('dsh-context-imports: existing injection found, skipped (source=%s)', source)
-      return
-    }
+    // The ledger answers in O(1) once injected; the full-log scan covers
+    // cross-process resumes. Compaction cleared the ledger (see above), so
+    // the scan alone decides: block still present → skip, removed → re-seed.
+    if (injectedSessions.has(session) || hasExistingInjection(agent)) return decision
     try {
-      const cwd = payload.agent.session.header?.cwd ?? process.cwd()
+      signal.throwIfAborted()
+      const cwd = session.header?.cwd ?? process.cwd()
       const bundle = await collectBundle(cfg, cwd)
       // Explicit UI locale preference wins; otherwise follow the browser-resolved
       // language synced by the client half; final fallback English.
       const wrapper = wrapperFor(readLocalePreference(ctx) ?? (cfg.detectedLocale || undefined))
       const text = renderBundle(cfg, bundle, wrapper)
-      if (text === undefined) return
-      payload.agent.inject(createUserMessage({
+      if (text === undefined) {
+        injectedSessions.add(session)
+        return decision
+      }
+      const message = createUserMessage({
         content: [{ type: 'text', text }],
         source: { kind: 'plugin', plugin: name, form: 'instructions' },
-      }))
-      injectedSessions.add(payload.agent.session)
-      ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (source=%s)',
-        bundle.sections.length, bundle.missing.length, bundle.omitted.length, source)
+      })
+      // Insert before the first user message → after all context injections.
+      let insertAt = decision.messages.length
+      for (let i = 0; i < decision.messages.length; i++) {
+        if ((decision.messages[i] as { source?: { kind?: string } }).source?.kind === 'user') {
+          insertAt = i
+          break
+        }
+      }
+      injectedSessions.add(session)
+      ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted at position %d (scene=%s)',
+        bundle.sections.length, bundle.missing.length, bundle.omitted.length, insertAt, scene)
+      return {
+        ...decision,
+        messages: decision.messages.toSpliced(insertAt, 0, message),
+      }
     } catch (error) {
       ctx.logger.warn('dsh-context-imports: injection failed: %o', error)
+      return decision
     }
   })
 }
