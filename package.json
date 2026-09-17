@@ -1,0 +1,66 @@
+{
+  "name": "dsh-context-imports",
+  "version": "0.1.0",
+  "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "agents-md",
+    "claude-md",
+    "context",
+    "memory",
+    "imports"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ciskonc/dsh-context-imports.git"
+  },
+  "homepage": "https://github.com/ciskonc/dsh-context-imports#readme",
+  "bugs": "https://github.com/ciskonc/dsh-context-imports/issues",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": ">=0.1.5-rc.2 <2",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 <2",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0",
+    "tsdown": "^0.22.14"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:client": "tsdown"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  }
+}
