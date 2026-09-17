@@ -137,8 +137,6 @@ interface Bundle {
   sections: Section[]
   missing: string[]
   omitted: string[]
-  /** Content sample of the first scanned instruction file — locating anchor in decision.messages. */
-  instructionFingerprint?: string
 }
 
 interface QueueItem {
@@ -155,7 +153,6 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
   const sections: Section[] = []
   const missing: string[] = []
   const omitted: string[] = []
-  let instructionFingerprint: string | undefined
   let total = 0
 
   const enqueue = (abs: string, rel: string, depth: number, scanOnly: boolean) => {
@@ -199,12 +196,7 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
       }
     }
 
-    if (item.scanOnly) {
-      // Anchor used to place our injection right after this file's message.
-      const sample = text.trim().slice(0, 120)
-      if (!instructionFingerprint && sample.length >= 24) instructionFingerprint = sample
-      continue
-    }
+    if (item.scanOnly) continue
     if (total + raw.byteLength > cfg.maxTotalBytes) {
       omitted.push(item.rel)
       continue
@@ -213,7 +205,7 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
     sections.push({ path: item.rel, content: text, truncatedAt })
   }
 
-  return { sections, missing, omitted, instructionFingerprint }
+  return { sections, missing, omitted }
 }
 
 /* ------------------------------------------------------------------ *
@@ -410,44 +402,18 @@ export function apply(ctx: Context, entry: Config): void {
         content: [{ type: 'text', text }],
         source: { kind: 'plugin', plugin: name, form: 'instructions' },
       })
-      // Placement: right AFTER the instruction-file message (the @import
-      // anchor), located by content fingerprint. Fallback: before the first
-      // user message. Diagnostics log the observed order either way.
-      let insertAt = decision.messages.length
-      for (let i = 0; i < decision.messages.length; i++) {
-        if ((decision.messages[i] as { source?: { kind?: string } }).source?.kind === 'user') {
-          insertAt = i
-          break
-        }
-      }
-      if (bundle.instructionFingerprint) {
-        const fp = bundle.instructionFingerprint
-        for (let i = 0; i < decision.messages.length; i++) {
-          let raw: string
-          try {
-            raw = JSON.stringify(decision.messages[i])
-          } catch {
-            continue
-          }
-          if (raw.includes(fp)) {
-            insertAt = i + 1
-            break
-          }
-        }
-      }
-      {
-        decision.messages.forEach((m, i) => {
-          const src = (m as { source?: { kind?: string; plugin?: string } }).source
-          const text = JSON.stringify((m as { content?: { text?: string }[] }).content?.[0] ?? {}).slice(0, 80)
-          ctx.logger.info('dsh-context-imports: msg[%d] kind=%s plugin=%s role=%s %s', i, src?.kind, src?.plugin, (m as { role?: string }).role, text)
-        })
-      }
+      // Placement: append to the END of the step's message list — the same
+      // position the stock skill-catalog uses. Context injections from
+      // outer waterfall listeners (agent-instructions baseline, skill
+      // catalog, …) join AFTER our inner pass, so only the tail is
+      // guaranteed to sit behind all of them. The model reads our expanded
+      // files last, right after the instructions that reference them.
       injectedSessions.add(session)
-      ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted at position %d (scene=%s)',
-        bundle.sections.length, bundle.missing.length, bundle.omitted.length, insertAt, scene)
+      ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (scene=%s)',
+        bundle.sections.length, bundle.missing.length, bundle.omitted.length, scene)
       return {
         ...decision,
-        messages: decision.messages.toSpliced(insertAt, 0, message),
+        messages: [...decision.messages, message],
       }
     } catch (error) {
       ctx.logger.warn('dsh-context-imports: injection failed: %o', error)
