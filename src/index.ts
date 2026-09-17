@@ -272,7 +272,37 @@ function readLocalePreference(ctx: Context): string | undefined {
 
 interface AgentLike {
   inject(message: unknown): void
-  session: { header?: { cwd?: string } }
+  session: {
+    header?: { cwd?: string }
+    surface?: { nodes: ArrayLike<number> }
+    eventAt?(seq: number): unknown
+  }
+}
+
+/**
+ * True when this session's durable history already carries one of our
+ * injections. Used to avoid stacking a duplicate context block when
+ * `session-start` re-fires for a resumed session (e.g. after a plugin
+ * upgrade changed the wrapper language or content).
+ */
+function hasExistingInjection(agent: AgentLike): boolean {
+  try {
+    const nodes = agent.session.surface?.nodes
+    const eventAt = agent.session.eventAt
+    if (!nodes || !eventAt) return false
+    const all = Array.from(nodes)
+    for (let i = all.length - 1; i >= 0; i--) {
+      const event = eventAt.call(agent.session, all[i]) as
+        | { type?: string; data?: { source?: { kind?: string; plugin?: string } } }
+        | undefined
+      if (event?.type !== 'user/message') continue
+      const src = event.data?.source
+      if (src?.kind === 'plugin' && src?.plugin === name) return true
+    }
+  } catch {
+    return false // unreadable surface: prefer injecting over losing context
+  }
+  return false
 }
 
 export function apply(ctx: Context, entry: Config): void {
@@ -300,6 +330,13 @@ export function apply(ctx: Context, entry: Config): void {
     const cfg = sourceOf()
     const source = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (source === undefined || !cfg.injectOn.includes(source)) return
+    // A resumed session's history may already carry an injection (e.g. from
+    // before a plugin upgrade). Re-injecting would stack a duplicate block,
+    // so skip — startup/clear/compact still inject unconditionally.
+    if (source === 'resume' && hasExistingInjection(payload.agent)) {
+      ctx.logger.info('dsh-context-imports: resume with existing injection, skipped')
+      return
+    }
     try {
       const cwd = payload.agent.session.header?.cwd ?? process.cwd()
       const bundle = await collectBundle(cfg, cwd)
