@@ -274,41 +274,71 @@ interface AgentLike {
   inject(message: unknown): void
   session: {
     header?: { cwd?: string }
+    /** Official dsh-session API: full-log snapshot + cursor. */
+    snapshotEvents?(from?: number, to?: number): readonly unknown[]
+    seq?: number
     surface?: { nodes: ArrayLike<number> }
     eventAt?(seq: number): unknown
   }
 }
 
+/** Sessions this process already injected into (guards the pre-persist window). */
+const injectedSessions = new WeakSet<object>()
+
+/** Fingerprints unique to our injected messages, regardless of event shape. */
+const FINGERPRINTS = [
+  '"plugin":"dsh-context-imports"',
+  'injected at session start by dsh-context-imports',
+  '由 dsh-context-imports 在会话启动时注入',
+]
+
 /**
- * True when this session's durable history already carries one of our
- * injections, regardless of the event shape it was recorded under —
- * injected messages persist as `agent/inbox/spliced` inbox events
- * (source inside `data.inserted[]`), not as `user/message`. Match on the
- * plugin source tag or the unique wrapper fingerprints. This keeps at
- * most ONE injection alive in the active history: resumed sessions and
- * not-yet-compacted histories skip, while a compaction that removed the
- * old block makes the session injectable again (re-seed).
+ * True when the durable log already carries one of our injections.
+ *
+ * Verified against a live session log: injected messages persist as
+ * `agent/inbox/spliced` events (source inside `data.inserted[]`) — they are
+ * NOT surface events, so `surface.nodes` never sees them. Scan the full log
+ * through the official `snapshotEvents()` instead, pre-filtered by event type
+ * to keep the stringify cost bounded.
  */
 function hasExistingInjection(agent: AgentLike): boolean {
   try {
+    const session = agent.session
+    if (typeof session.snapshotEvents === 'function') {
+      const events = session.snapshotEvents.call(session)
+      for (const event of events) {
+        const type = (event as { type?: string } | undefined)?.type
+        if (type !== 'agent/inbox/spliced' && type !== 'user/message') continue
+        let raw: string
+        try {
+          raw = JSON.stringify(event)
+        } catch {
+          continue
+        }
+        if (!raw.includes('dsh-context-imports')) continue
+        if (FINGERPRINTS.some((f) => raw.includes(f))) return true
+      }
+      return false
+    }
+  } catch {
+    // fall through to the legacy surface scan
+  }
+  try {
+    // Legacy fallback: surface scan (cannot see inbox events; better than nothing).
     const nodes = agent.session.surface?.nodes
     const eventAt = agent.session.eventAt
     if (!nodes || !eventAt) return false
-    const all = Array.from(nodes)
-    for (let i = all.length - 1; i >= 0; i--) {
-      let raw: string | undefined
+    for (const seq of Array.from(nodes).toReversed()) {
+      let raw: string
       try {
-        raw = JSON.stringify(eventAt.call(agent.session, all[i]))
+        raw = JSON.stringify(eventAt.call(agent.session, seq))
       } catch {
         continue
       }
-      if (!raw || !raw.includes('dsh-context-imports')) continue
-      if (raw.includes('"plugin":"dsh-context-imports"')) return true
-      if (raw.includes('injected at session start by dsh-context-imports')) return true
-      if (raw.includes('由 dsh-context-imports 在会话启动时注入')) return true
+      if (raw.includes('dsh-context-imports') && FINGERPRINTS.some((f) => raw.includes(f))) return true
     }
   } catch {
-    return false // unreadable surface: prefer injecting over losing context
+    return false // unreadable history: prefer injecting over losing context
   }
   return false
 }
@@ -339,9 +369,11 @@ export function apply(ctx: Context, entry: Config): void {
     const source = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (source === undefined || !cfg.injectOn.includes(source)) return
     // Single invariant: at most one injection alive in the active history.
-    // If any previous injection is still recorded (resume, or compaction
-    // that kept it), skip; if compaction removed it, re-inject (re-seed).
-    if (hasExistingInjection(payload.agent)) {
+    // Process-local ledger guards the window before the first message is
+    // persisted; compaction clears it so the history scan alone decides —
+    // old block still present → skip, removed by compaction → re-inject.
+    if (source === 'compact') injectedSessions.delete(payload.agent.session)
+    if (injectedSessions.has(payload.agent.session) || hasExistingInjection(payload.agent)) {
       ctx.logger.info('dsh-context-imports: existing injection found, skipped (source=%s)', source)
       return
     }
@@ -357,6 +389,7 @@ export function apply(ctx: Context, entry: Config): void {
         content: [{ type: 'text', text }],
         source: { kind: 'plugin', plugin: name, form: 'instructions' },
       }))
+      injectedSessions.add(payload.agent.session)
       ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (source=%s)',
         bundle.sections.length, bundle.missing.length, bundle.omitted.length, source)
     } catch (error) {
