@@ -281,9 +281,13 @@ interface AgentLike {
 
 /**
  * True when this session's durable history already carries one of our
- * injections. Used to avoid stacking a duplicate context block when
- * `session-start` re-fires for a resumed session (e.g. after a plugin
- * upgrade changed the wrapper language or content).
+ * injections, regardless of the event shape it was recorded under —
+ * injected messages persist as `agent/inbox/spliced` inbox events
+ * (source inside `data.inserted[]`), not as `user/message`. Match on the
+ * plugin source tag or the unique wrapper fingerprints. This keeps at
+ * most ONE injection alive in the active history: resumed sessions and
+ * not-yet-compacted histories skip, while a compaction that removed the
+ * old block makes the session injectable again (re-seed).
  */
 function hasExistingInjection(agent: AgentLike): boolean {
   try {
@@ -292,12 +296,16 @@ function hasExistingInjection(agent: AgentLike): boolean {
     if (!nodes || !eventAt) return false
     const all = Array.from(nodes)
     for (let i = all.length - 1; i >= 0; i--) {
-      const event = eventAt.call(agent.session, all[i]) as
-        | { type?: string; data?: { source?: { kind?: string; plugin?: string } } }
-        | undefined
-      if (event?.type !== 'user/message') continue
-      const src = event.data?.source
-      if (src?.kind === 'plugin' && src?.plugin === name) return true
+      let raw: string | undefined
+      try {
+        raw = JSON.stringify(eventAt.call(agent.session, all[i]))
+      } catch {
+        continue
+      }
+      if (!raw || !raw.includes('dsh-context-imports')) continue
+      if (raw.includes('"plugin":"dsh-context-imports"')) return true
+      if (raw.includes('injected at session start by dsh-context-imports')) return true
+      if (raw.includes('由 dsh-context-imports 在会话启动时注入')) return true
     }
   } catch {
     return false // unreadable surface: prefer injecting over losing context
@@ -330,11 +338,11 @@ export function apply(ctx: Context, entry: Config): void {
     const cfg = sourceOf()
     const source = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (source === undefined || !cfg.injectOn.includes(source)) return
-    // A resumed session's history may already carry an injection (e.g. from
-    // before a plugin upgrade). Re-injecting would stack a duplicate block,
-    // so skip — startup/clear/compact still inject unconditionally.
-    if (source === 'resume' && hasExistingInjection(payload.agent)) {
-      ctx.logger.info('dsh-context-imports: resume with existing injection, skipped')
+    // Single invariant: at most one injection alive in the active history.
+    // If any previous injection is still recorded (resume, or compaction
+    // that kept it), skip; if compaction removed it, re-inject (re-seed).
+    if (hasExistingInjection(payload.agent)) {
+      ctx.logger.info('dsh-context-imports: existing injection found, skipped (source=%s)', source)
       return
     }
     try {
