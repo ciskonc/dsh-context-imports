@@ -32,6 +32,10 @@ interface LocaleLike {
   register(ns: string, locale: string, dict: Record<string, string>): () => void
   addLanguage(input: { id: string; label: string; fallback: string }): () => void
   bind(ns: string): Translate
+  /** 当前语言快照（含浏览器 provisional 解析）。 */
+  getSnapshot(): { active: string }
+  /** 订阅语言变化。 */
+  subscribe(listener: () => void): () => void
 }
 
 interface SettingsScopeBinderLike {
@@ -127,7 +131,23 @@ export function apply(ctx: ClientContext): void {
     }, `dsh-context-imports: ${pack.id} dictionary`)
   }
 
-  const card = new ContextImportsCardController(ctx.settingsScope.bind({ namespace: NS }))
+  const scope = ctx.settingsScope.bind({ namespace: NS })
+  const card = new ContextImportsCardController(scope)
+
+  // 把浏览器解析后的活跃语言写进我们自己的命名空间（detectedLocale），
+  // 供 host 半在用户未显式设置语言偏好时跟随 UI 语言。官方 locale 命名空间的
+  // preference 未设置时宿主读不到浏览器语言，这是唯一的跨端通道。
+  let lastSynced = ''
+  const syncDetectedLocale = () => {
+    const active = ctx.locale.getSnapshot().active
+    if (!active || active === lastSynced) return
+    lastSynced = active
+    void Promise.resolve(scope.set('detectedLocale', active)).catch(() => {
+      lastSynced = ''
+    })
+  }
+  ctx.effect(() => ctx.locale.subscribe(syncDetectedLocale), 'dsh-context-imports: locale sync')
+  syncDetectedLocale()
 
   // keyed slot：ConfigurablePluginsTab 按 Host 服务的命名空间派发（key = ns）。
   ctx.effect(

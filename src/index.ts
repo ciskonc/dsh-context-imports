@@ -40,6 +40,8 @@ export interface Config {
   injectOn: string[]
   /** Custom wrapper template with {{content}} placeholder; empty = locale default. */
   template: string
+  /** Auto-written by the client half: the browser-resolved UI language. Lets the host follow the UI locale when the user has no explicit locale preference. */
+  detectedLocale: string
 }
 
 export const Config = z.object({
@@ -51,6 +53,7 @@ export const Config = z.object({
   maxTotalBytes: z.number().default(128 * 1024),
   injectOn: z.array(z.string()).default([...SOURCES]),
   template: z.string().default(''),
+  detectedLocale: z.string().default(''),
 })
 
 /* ------------------------------------------------------------------ *
@@ -273,7 +276,10 @@ interface AgentLike {
 }
 
 export function apply(ctx: Context, entry: Config): void {
-  let current: Config = entry
+  // The settings thunk returns the currently authoritative value (composition
+  // entry + user overrides); evaluating it lazily at each injection picks up
+  // settings-card edits without a reload.
+  let sourceOf: () => Config = () => entry
 
   // Optional settings integration: register our namespace so the web
   // settings card (client half) can edit this configuration at runtime.
@@ -281,7 +287,7 @@ export function apply(ctx: Context, entry: Config): void {
     ;(ctx as unknown as Injectable).inject(['settings'], (c) => {
       c.settings.installSection(ctx, NS, Config, entry, {
         setSource: (get) => {
-          current = get()
+          sourceOf = get
         },
         onChange: () => {},
       })
@@ -291,13 +297,15 @@ export function apply(ctx: Context, entry: Config): void {
   }
 
   ctx.on('agent/session-start', async (payload: { agent: AgentLike; source: string }) => {
-    const cfg = current
+    const cfg = sourceOf()
     const source = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (source === undefined || !cfg.injectOn.includes(source)) return
     try {
       const cwd = payload.agent.session.header?.cwd ?? process.cwd()
       const bundle = await collectBundle(cfg, cwd)
-      const wrapper = wrapperFor(readLocalePreference(ctx))
+      // Explicit UI locale preference wins; otherwise follow the browser-resolved
+      // language synced by the client half; final fallback English.
+      const wrapper = wrapperFor(readLocalePreference(ctx) ?? (cfg.detectedLocale || undefined))
       const text = renderBundle(cfg, bundle, wrapper)
       if (text === undefined) return
       payload.agent.inject(createUserMessage({
