@@ -76,7 +76,11 @@ agent/session-start（startup / resume / clear / compact）
 
 ## 安装
 
-npm 包即将发布，发布后此处提供一键安装命令。当前可从源码构建：
+```sh
+dsh plugin --profile web add dsh-context-imports
+```
+
+装好即用（默认扫描 AGENTS.md/CLAUDE.md 的 @import 并在会话启动时注入被引用文件）。也可从源码构建：
 
 ```sh
 git clone https://github.com/ciskonc/dsh-context-imports.git

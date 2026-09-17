@@ -71,7 +71,11 @@ agent/pre-step (every step) → injection decision
 
 ## Install
 
-The npm package is coming soon — a one-line install command will appear here once published. Meanwhile, build from source:
+```sh
+dsh plugin --profile web add dsh-context-imports
+```
+
+Works out of the box (scans AGENTS.md/CLAUDE.md for @imports and injects the referenced files at session start). Or build from source:
 
 ```sh
 git clone https://github.com/ciskonc/dsh-context-imports.git
