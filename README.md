@@ -1,8 +1,10 @@
 <div align="center">
 
-# dsh-context-imports · 上下文导入
+# dsh-context-imports
 
-<p align="center">DeepSeek Harness 会注入 <b>AGENTS.md 本体</b>，但里面的 <b>@路径 引用只是死文本</b>——模型根本读不到。本插件把 Claude Code 的 <b>@import 机制</b>真正带进 DSH：会话启动时<b>递归展开</b>引用（深度可控、预算封顶、代码块忽略、缺失兜底），把被引用文件全文注入为持久上下文；<b>压缩后自动续命</b>，<b>活跃上下文永远只有一份</b>（事件形态无关的注入检测）；装上即有<b>六语言设置卡片</b>（中/英/日/法/俄/韩），注入包装文本跟随 UI 语言。只基于官方公开 API（<code>agent/session-start</code> + <code>agent.inject()</code> + schemastery + dsh-settings），<b>零功能插件依赖</b>。</p>
+Inject the files referenced from AGENTS.md into model context at session start.
+
+DeepSeek Harness injects AGENTS.md itself, but the `@path` references inside it stay as plain text and the model never sees them. This plugin expands those references the way Claude Code does: it reads each referenced file and adds the content to the session context.
 
 <p align="center">
   <a href="LICENSE"><img alt="GitHub license" src="https://img.shields.io/github/license/ciskonc/dsh-context-imports"></a>
@@ -11,100 +13,89 @@
   <a href="https://github.com/ciskonc/dsh-context-imports/graphs/contributors"><img alt="GitHub contributors" src="https://img.shields.io/github/contributors/ciskonc/dsh-context-imports"></a>
 </p>
 
-中文 | [English](README.en.md)
+English | [中文](README.zh-CN.md)
 
 </div>
 
 ---
 
-## 它解决什么问题
+## Why
 
-| | 没有 dsh-context-imports | 装上之后 |
+| | Without this plugin | With it |
 |---|---|---|
-| AGENTS.md 本体 | ✅ 官方 agent-instructions 注入 | ✅ 仍由官方注入（不重复） |
-| `@00_BOOT/SYSTEM_STATE.md` 等引用 | ❌ 死文本，模型看不到 | ✅ 全文注入为会话上下文 |
-| 引用的引用（嵌套 @import） | ❌ 无人处理 | ✅ 递归展开，深度可控 |
-| 长会话压缩后 | ❌ 状态文件随历史被压掉 | ✅ compact 后自动重新注入（续命） |
-| 恢复会话（resume） | — | ✅ 检测到已有注入即跳过，永不叠加重复块 |
+| AGENTS.md itself | Injected by the stock agent-instructions plugin | Still injected by it, no duplication |
+| `@docs/architecture.md` references | Plain text, ignored | Full file content in context |
+| Nested imports | Nobody handles them | Expanded recursively, depth limited |
+| After compaction | Referenced files are gone with the history | Re-injected automatically |
+| Resumed sessions | May stack a second copy | Skipped when one is already present |
 
-## 工作机制
+## How it works
 
 ```text
-agent/session-start（startup / resume / clear / compact）
-  │
-  ├─ 读取配置（设置卡片实时生效，无需重载）
-  │
-  ├─ 扫描指令文件（默认 AGENTS.md / CLAUDE.md）中的 @路径 引用
-  │    ├─ 跳过围栏代码块；必须带文件扩展名
-  │    ├─ 相对路径按「引用者所在目录」解析，逐层递归（默认 ≤3 层）
-  │    └─ 按解析后路径去重，环引用天然免疫
-  │
-  ├─ 合并显式 files 列表（这些文件注入全文，指令文件本体只扫描不重注）
-  │
-  ├─ 预算封顶：单文件 64KB（超限截断并标注）/ 总量 128KB（超限省略并标注）
-  │    缺失文件只记一行提示，不报错
-  │
-  ├─ 单份不变量：全量事件日志指纹检测，已有注入 → 跳过；
-  │    compact 真正压掉旧块后 → 自动重注续命
-  │
-  └─ pre-step 定位插入：排在 AGENTS.md / skill 目录等全部上下文注入之后、
-       用户消息之前；<system-reminder> 内只有 <file path="…"> 块与状态行，
-       零引导废话；包装可用 template 自定义
+agent/session-start (startup / resume / clear / compact) records the scene
+agent/pre-step (every step) decides whether to inject
+  ├─ scan the instruction files (default AGENTS.md, CLAUDE.md) for @path imports
+  │    ├─ fenced code blocks are skipped; the path must have a file extension
+  │    ├─ relative paths resolve against the importing file's directory
+  │    └─ duplicates collapse by resolved path, so import cycles are harmless
+  ├─ merge the explicit files list (injected in full; instruction files are
+  │    scanned but never re-injected)
+  ├─ budgets: 64 KB per file (truncated with a note), 128 KB total (skipped
+  │    with a note); a missing file becomes a one-line note instead of an error
+  ├─ at most one injection stays in the active history: the full event log is
+  │    fingerprint-scanned, and compaction that removes the block re-enables it
+  └─ the bundle is appended to the end of the step messages, after AGENTS.md
+       and every other context injection
 ```
 
-## 特性
+The injected message is a `<system-reminder>` containing `<file path="...">` blocks and nothing else. Set `template` if you want your own framing around it.
 
-- **Claude Code 式 @import**：`AGENTS.md` 里写 `@04_MEMORY/INDEX.md`，会话开始模型就"已经读过"它——不再依赖 Agent 自觉执行启动读取（那个假设已被证明不可靠）。
-- **四场景触发，全部可配**：新会话 / 恢复 / 清空 / 压缩后。压缩续命是刻意设计——长会话压缩后状态文件自动回场。
-- **单份注入不变量**：对持久会话日志做了事件形态核验（注入消息双形态落库：`agent/inbox/spliced` 与 `user/message`），检测按全量日志指纹匹配，与落库形态无关；任何场景下活跃上下文最多一份。
-- **六语言设置卡片**：设置 → Plugins → Plugin configuration 图形化编辑全部配置；界面文案中/英/日/法/俄/韩，跟随宿主语言实时切换。
-- **预算与兜底**：单文件/总量双预算、缺失文件降级为提示行、围栏代码块内的 `@` 不误判、环引用去重。
-- **纯官方 API**：cordis 事件（`agent/session-start` + `agent/pre-step`）+ `createUserMessage`（dsh-llm）+ schemastery Config + dsh-settings `installSection`（可选服务，缺失时按组合配置照常工作）。不依赖任何其他功能插件。
+## Features
 
-## 配置
+- Expands `@path` imports recursively. Default depth is 3; import cycles and duplicates are collapsed.
+- Triggers on new sessions, resume, clear, and after compaction. Each scene can be turned off.
+- Keeps exactly one injection in the active history. After compaction removes it, the next session start injects again.
+- Six-language settings card (zh, en, ja, fr, ru, ko) under Settings, Plugins, Plugin configuration. Every option is editable there and applies without a reload.
+- Byte budgets per file and in total. Missing files are reported, never fatal.
+- Uses the official API surface only: cordis events, `createUserMessage` from dsh-llm, a schemastery config, and the optional dsh-settings namespace. No feature-plugin dependencies.
 
-| 字段 | 默认 | 说明 |
+## Configuration
+
+| Field | Default | Description |
 |---|---|---|
-| `files` | `[]` | 额外注入的文件（相对会话工作目录或绝对路径） |
-| `scanImports` | `true` | 扫描 AGENTS.md 等指令文件中的 @import 并递归展开 |
-| `instructionFiles` | `["AGENTS.md", "CLAUDE.md"]` | 参与扫描的指令文件候选名（只扫描，不重注本体） |
-| `maxDepth` | `3` | @import 递归深度上限 |
-| `maxFileBytes` | `65536` | 单文件字节上限（超限截断） |
-| `maxTotalBytes` | `131072` | 总字节预算（超限省略） |
-| `injectOn` | 全部四项 | 触发注入的会话启动场景（startup / resume / clear / compact） |
-| `template` | `""` | 自定义包装模板，`{{content}}` 标记注入内容位置；留空用语言默认 |
+| `files` | `[]` | Extra files to inject, relative to the session working directory or absolute |
+| `scanImports` | `true` | Scan AGENTS.md and the other instruction files for @imports |
+| `instructionFiles` | `["AGENTS.md", "CLAUDE.md"]` | Files to scan. They are never re-injected themselves |
+| `maxDepth` | `3` | How many levels of nested imports to follow |
+| `maxFileBytes` | `65536` | Per-file cap in bytes; larger files are truncated |
+| `maxTotalBytes` | `131072` | Total budget; files beyond it are skipped with a note |
+| `injectOn` | all four | Which session-start scenes trigger injection |
+| `template` | `""` | Custom wrapper text. `{{content}}` marks where the files go; empty uses the plain wrapper |
 
-## 安装
+## Install
 
 ```sh
 dsh plugin --profile web add dsh-context-imports
 ```
 
-装好即用（默认扫描 AGENTS.md/CLAUDE.md 的 @import 并在会话启动时注入被引用文件）。也可从源码构建：
+It works with no configuration: AGENTS.md and CLAUDE.md are scanned and their imports injected. To build from source instead:
 
 ```sh
 git clone https://github.com/ciskonc/dsh-context-imports.git
 cd dsh-context-imports
 npm install
-DSH_CHECKOUT=<你的 dsh 安装目录> npm run build        # host 半 → lib/index.js
-npm run build:client                                  # 浏览器半 → lib/client.js
+DSH_CHECKOUT=<path-to-your-dsh-installation> npm run build
+npm run build:client
 ```
 
-构建产物为标准 DSH 插件包（`lib/`），装入你的 profile 即可；设置卡片出现在 **Settings → Plugins → Plugin configuration**。
+## Development
 
-## 开发
-
-| 文件 | 职责 |
+| File | Role |
 |---|---|
-| [src/index.ts](src/index.ts) | Host 半：session-start 监听、@import 递归展开、预算、注入、settings 命名空间 |
-| [src/client/index.ts](src/client/index.ts) | 浏览器半入口：六语言字典注册 + `settings.plugin.item` keyed slot 卡片 |
-| [src/client/form.ts](src/client/form.ts) | 精简 CardForm（官方实现移植，修正数组回读比较） |
-| [src/client/ContextImportsCard.tsx](src/client/ContextImportsCard.tsx) | 卡片组件（复刻官方 PluginCard 结构与 CSS 变量） |
-
-**client 插件两条铁律**（真实踩坑沉淀，违者炸宿主）：
-
-1. `__ModuleLoader__.load({ id })` 的 `id` 必须逐字等于 package.json 的 `name`——差一个 scope 前缀 loader 就按"未注册"处理；
-2. `inject` 只声明 shell 模块表（staticModules 种子）里真实存在的模块——已从模块表删除的包（如 `@deepseek-ai/dsh-client-runtime`）声明了就崩。
+| `src/index.ts` | Host side: session-start ledger, import expansion, budgets, pre-step injection, settings namespace |
+| `src/client/index.ts` | Browser side: six-language dictionaries and the settings card slot |
+| `src/client/form.ts` | Staged form model behind the card |
+| `src/client/ContextImportsCard.tsx` | The card component |
 
 ## License
 

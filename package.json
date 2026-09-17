@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-imports",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
   "keywords": [
     "dsh-plugin",
@@ -21,7 +21,8 @@
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
   "files": [
-    "lib"
+    "lib",
+    "cordis.patch.yml"
   ],
   "license": "MIT",
   "peerDependencies": {
@@ -56,6 +57,12 @@
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "engines": {
+      "dsh": ">=0.1.5-rc.1"
+    },
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-slots"
