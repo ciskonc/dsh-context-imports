@@ -86,6 +86,8 @@ DSH_CHECKOUT=<你的 dsh 安装目录> npm run build
 npm run build:client
 ```
 
+**版本适配**：在 DeepSeek Harness `0.1.5-rc.2` 上测试（插件 v0.1.1）。包声明 `engines: dsh >= 0.1.5-rc.1`，支持 `dsh.bundle` 的版本理论上都可用。每个 Release 的说明里会注明当时测试所用的 DSH 版本。
+
 ## 开发
 
 | 文件 | 职责 |

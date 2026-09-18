@@ -88,6 +88,8 @@ DSH_CHECKOUT=<path-to-your-dsh-installation> npm run build
 npm run build:client
 ```
 
+**Compatibility**: tested against DeepSeek Harness `0.1.5-rc.2` (plugin v0.1.1). The package declares `engines: dsh >= 0.1.5-rc.1`; any build that supports `dsh.bundle` manifests should work. Check each release's notes for the version it was tested against.
+
 ## Development
 
 | File | Role |
