@@ -360,14 +360,19 @@ export function apply(ctx: Context, entry: Config): void {
 
   // Which session-start scene fired last, per session. `agent/pre-step` has no
   // scene concept, so the session-start listener records it and the pre-step
-  // listener consults it against `injectOn`.
+  // listener consults it against `injectOn`. Sessions WITHOUT any recorded
+  // scene (long-lived sessions that never saw a session-start in this
+  // process — model switches, sessions created before the plugin activated)
+  // default to ALLOWED: the single-injection invariant is the only gate, so
+  // they get seeded exactly once on their next step.
   const lastScene = new WeakMap<object, string>()
 
   ctx.on('agent/session-start', (payload) => {
     const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (scene === undefined) return
     if (scene === 'compact') injectedSessions.delete(payload.agent.session)
-    lastScene.set(payload.agent.session, scene)
+    const allowed = sourceOf().injectOn.includes(scene)
+    lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
   })
 
   // Injection happens as a pre-step waterfall: we place the message ourselves
@@ -378,9 +383,9 @@ export function apply(ctx: Context, entry: Config): void {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const session = agent.session
-    const scene = lastScene.get(session)
+    const scene = lastScene.get(session) ?? 'active-session'
     const cfg = sourceOf()
-    if (scene === undefined || !cfg.injectOn.includes(scene)) return decision
+    if (scene === 'suppressed') return decision
     // Single invariant: at most one injection alive in the active history.
     // The ledger answers in O(1) once injected; the full-log scan covers
     // cross-process resumes. Compaction cleared the ledger (see above), so
