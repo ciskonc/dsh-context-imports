@@ -286,43 +286,25 @@ const FINGERPRINTS = [
 ]
 
 /**
- * True when the durable log already carries one of our injections.
+ * True when one of our injections is VISIBLE on the current surface.
  *
- * Verified against a live session log: injected messages persist as
- * `agent/inbox/spliced` events (source inside `data.inserted[]`) — they are
- * NOT surface events, so `surface.nodes` never sees them. Scan the full log
- * through the official `snapshotEvents()` instead, pre-filtered by event type
- * to keep the stringify cost bounded.
+ * Semantics verified by replaying a real session's surface fold (26 replace
+ * ops): "already injected" means visible NOW. Injections that compaction has
+ * replaced out of the surface must NOT block a re-seed, so the full durable
+ * log is deliberately NOT scanned — only the live surface projection is.
+ *
+ * Both durable shapes carry the fingerprints: the inbox path records
+ * agent/inbox/spliced events (never on the surface) whose message later joins
+ * the surface as a user/message; the pre-step path appends a user/message
+ * directly. Matching the surface nodes on the fingerprints covers whichever
+ * shape ended up visible.
  */
 function hasExistingInjection(agent: AgentLike): boolean {
   try {
-    const session = agent.session
-    if (typeof session.snapshotEvents === 'function') {
-      // No type pre-filter: the durable shape of a pre-step-injected message
-      // differs from the inbox path, so match on fingerprints only. One full
-      // pass per process (cached snapshot, WeakSet ledger afterwards).
-      const events = session.snapshotEvents.call(session)
-      for (const event of events) {
-        let raw: string
-        try {
-          raw = JSON.stringify(event)
-        } catch {
-          continue
-        }
-        if (!raw.includes('dsh-context-imports')) continue
-        if (FINGERPRINTS.some((f) => raw.includes(f))) return true
-      }
-      return false
-    }
-  } catch {
-    // fall through to the legacy surface scan
-  }
-  try {
-    // Legacy fallback: surface scan (cannot see inbox events; better than nothing).
     const nodes = agent.session.surface?.nodes
     const eventAt = agent.session.eventAt
     if (!nodes || !eventAt) return false
-    for (const seq of Array.from(nodes).toReversed()) {
+    for (const seq of Array.from(nodes)) {
       let raw: string
       try {
         raw = JSON.stringify(eventAt.call(agent.session, seq))
@@ -332,7 +314,7 @@ function hasExistingInjection(agent: AgentLike): boolean {
       if (raw.includes('dsh-context-imports') && FINGERPRINTS.some((f) => raw.includes(f))) return true
     }
   } catch {
-    return false // unreadable history: prefer injecting over losing context
+    return false // unreadable surface: prefer injecting over losing context
   }
   return false
 }
