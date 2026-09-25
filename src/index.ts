@@ -263,62 +263,6 @@ function readLocalePreference(ctx: Context): string | undefined {
  * Plugin entry
  * ------------------------------------------------------------------ */
 
-interface AgentLike {
-  inject(message: unknown): void
-  session: {
-    header?: { cwd?: string }
-    /** Official dsh-session API: full-log snapshot + cursor. */
-    snapshotEvents?(from?: number, to?: number): readonly unknown[]
-    seq?: number
-    surface?: { nodes: ArrayLike<number> }
-    eventAt?(seq: number): unknown
-  }
-}
-
-/** Sessions this process already injected into (guards the pre-persist window). */
-const injectedSessions = new WeakSet<object>()
-
-/** Fingerprints unique to our injected messages, regardless of event shape. */
-const FINGERPRINTS = [
-  '"plugin":"dsh-context-imports"',
-  'injected at session start by dsh-context-imports',
-  '由 dsh-context-imports 在会话启动时注入',
-]
-
-/**
- * True when one of our injections is VISIBLE on the current surface.
- *
- * Semantics verified by replaying a real session's surface fold (26 replace
- * ops): "already injected" means visible NOW. Injections that compaction has
- * replaced out of the surface must NOT block a re-seed, so the full durable
- * log is deliberately NOT scanned — only the live surface projection is.
- *
- * Both durable shapes carry the fingerprints: the inbox path records
- * agent/inbox/spliced events (never on the surface) whose message later joins
- * the surface as a user/message; the pre-step path appends a user/message
- * directly. Matching the surface nodes on the fingerprints covers whichever
- * shape ended up visible.
- */
-function hasExistingInjection(agent: AgentLike): boolean {
-  try {
-    const nodes = agent.session.surface?.nodes
-    const eventAt = agent.session.eventAt
-    if (!nodes || !eventAt) return false
-    for (const seq of Array.from(nodes)) {
-      let raw: string
-      try {
-        raw = JSON.stringify(eventAt.call(agent.session, seq))
-      } catch {
-        continue
-      }
-      if (raw.includes('dsh-context-imports') && FINGERPRINTS.some((f) => raw.includes(f))) return true
-    }
-  } catch {
-    return false // unreadable surface: prefer injecting over losing context
-  }
-  return false
-}
-
 export function apply(ctx: Context, entry: Config): void {
   // The settings thunk returns the currently authoritative value (composition
   // entry + user overrides); evaluating it lazily at each injection picks up
@@ -352,27 +296,38 @@ export function apply(ctx: Context, entry: Config): void {
   ctx.on('agent/session-start', (payload) => {
     const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (scene === undefined) return
-    if (scene === 'compact') injectedSessions.delete(payload.agent.session)
     const allowed = sourceOf().injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
   })
 
-  // Injection happens as a pre-step waterfall: we place the message ourselves
-  // right before the first user message — i.e. after every context injection
-  // (AGENTS.md, skill catalog, …) — instead of letting the inbox path put it
-  // on top of everything.
+  // Converge to EXACTLY ONE injection per request, using the official
+  // skill-catalog replacement pattern: `decision.messages` is the complete
+  // request sequence (history surface + this step's admitted messages), so
+  // counting our messages there covers every case —
+  //   zero  → scene-gated append (fresh session, compaction cleared the old
+  //           block, never-injected active session, model switch, …)
+  //   one   → leave as is
+  //   many  → drop the stale ones, keep the newest (history redundancy from
+  //           older versions converges here too)
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const session = agent.session
+    const mine: number[] = []
+    for (let i = 0; i < decision.messages.length; i++) {
+      const src = (decision.messages[i] as { source?: { kind?: string; plugin?: string } }).source
+      if (src?.kind === 'plugin' && src?.plugin === name) mine.push(i)
+    }
+    if (mine.length > 1) {
+      const drop = new Set(mine.slice(0, -1))
+      ctx.logger.info('dsh-context-imports: converged %d stale injections to one', mine.length)
+      return { ...decision, messages: decision.messages.filter((_, i) => !drop.has(i)) }
+    }
+    if (mine.length === 1) return decision
+
     const scene = lastScene.get(session) ?? 'active-session'
     const cfg = sourceOf()
-    if (scene === 'suppressed') return decision
-    // Single invariant: at most one injection alive in the active history.
-    // The ledger answers in O(1) once injected; the full-log scan covers
-    // cross-process resumes. Compaction cleared the ledger (see above), so
-    // the scan alone decides: block still present → skip, removed → re-seed.
-    if (injectedSessions.has(session) || hasExistingInjection(agent)) return decision
+    if (scene === 'suppressed' || !cfg.injectOn.includes(scene)) return decision
     try {
       signal.throwIfAborted()
       const cwd = session.header?.cwd ?? process.cwd()
@@ -381,10 +336,7 @@ export function apply(ctx: Context, entry: Config): void {
       // language synced by the client half; final fallback English.
       const wrapper = wrapperFor(readLocalePreference(ctx) ?? (cfg.detectedLocale || undefined))
       const text = renderBundle(cfg, bundle, wrapper)
-      if (text === undefined) {
-        injectedSessions.add(session)
-        return decision
-      }
+      if (text === undefined) return decision
       const message = createUserMessage({
         content: [{ type: 'text', text }],
         source: { kind: 'plugin', plugin: name, form: 'instructions' },
@@ -395,7 +347,6 @@ export function apply(ctx: Context, entry: Config): void {
       // catalog, …) join AFTER our inner pass, so only the tail is
       // guaranteed to sit behind all of them. The model reads our expanded
       // files last, right after the instructions that reference them.
-      injectedSessions.add(session)
       ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (scene=%s)',
         bundle.sections.length, bundle.missing.length, bundle.omitted.length, scene)
       return {
