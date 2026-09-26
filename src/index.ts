@@ -3,23 +3,34 @@
  *
  * Expands Claude Code-style `@path` imports found in workspace instruction
  * files (AGENTS.md / CLAUDE.md) and injects the referenced files into model
- * context at session start, via the official `agent/session-start` event and
- * `agent.inject()` channel. Optionally merges an explicit `files` list.
+ * context via the official `agent/created` scene ledger + `agent/pre-step`
+ * waterfall. Optionally merges an explicit `files` list.
  *
- * Official API surface only: cordis events, dsh-llm createUserMessage,
- * schemastery Config, dsh-settings installSection (optional service).
+ * Official API surface only (0.1.7): cordis events (agent/created,
+ * agent/pre-step), dsh-llm createUserMessage with a module-merged source
+ * kind, schemastery Config. Configuration rides the loader patch — no
+ * settings registration needed.
  */
 import { readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-agent' // pulls the cordis Events augmentation (agent/session-start typing)
+import type {} from '@deepseek-ai/dsh-agent' // pulls the cordis Events augmentation (agent/created, agent/pre-step)
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-context-imports'
 
-/** Settings namespace shared with the client settings card. */
-const NS = 'dsh-context-imports'
+/** Message source kind registered into the dsh-llm source map (0.1.7 pattern). */
+export interface ContextImportsSource {
+  kind: 'context-imports'
+  form: 'instructions'
+}
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'context-imports': ContextImportsSource
+  }
+}
 
 const SOURCES = ['startup', 'resume', 'clear', 'compact'] as const
 
@@ -233,113 +244,101 @@ function renderBundle(cfg: Config, bundle: Bundle, wrapper: Wrapper): string | u
 }
 
 /* ------------------------------------------------------------------ *
- * Settings integration (optional service — plugin works without it)
- * ------------------------------------------------------------------ */
-
-interface SettingsLike {
-  installSection(owner: unknown, ns: string, schema: unknown, entry: unknown, hooks: {
-    setSource(current: () => Config): void
-    onChange(): void
-  }): void
-  get(ns: string): unknown
-}
-
-interface Injectable {
-  inject(deps: string[], callback: (ctx: { settings: SettingsLike }) => void): void
-  get(name: string): unknown
-}
-
-function readLocalePreference(ctx: Context): string | undefined {
-  try {
-    const settings = (ctx as unknown as Injectable).get('settings') as SettingsLike | undefined
-    const value = settings?.get('locale') as { preference?: string } | undefined
-    return value?.preference
-  } catch {
-    return undefined
-  }
-}
-
-/* ------------------------------------------------------------------ *
  * Plugin entry
  * ------------------------------------------------------------------ */
 
-export function apply(ctx: Context, entry: Config): void {
-  // The settings thunk returns the currently authoritative value (composition
-  // entry + user overrides); evaluating it lazily at each injection picks up
-  // settings-card edits without a reload.
-  let sourceOf: () => Config = () => entry
+interface SessionLike {
+  header?: { cwd?: string }
+  surface?: { nodes: ArrayLike<number> }
+  eventAt?(seq: number): unknown
+}
 
-  // Optional settings integration: register our namespace so the web
-  // settings card (client half) can edit this configuration at runtime.
+/** Sessions this process already injected into (guards the pre-persist window). */
+const injectedSessions = new WeakSet<object>()
+
+/** True for our own message sources: 0.2.0+ kind plus the legacy 0.1.x shape. */
+function isOursSource(src: unknown): boolean {
+  if (typeof src !== 'object' || src === null) return false
+  const s = src as { kind?: string; plugin?: string }
+  return s.kind === 'context-imports' || (s.kind === 'plugin' && s.plugin === name)
+}
+
+/**
+ * True when one of our injections is visible on the session's live surface.
+ *
+ * `decision.messages` in pre-step is only this step's admitted batch — it
+ * does NOT contain history, so counting there can never answer "already
+ * injected". The durable surface is the right source: an injection visible
+ * on it means the model sees it; a block compaction replaced out of the
+ * surface no longer counts and re-seeding is allowed again.
+ */
+function hasVisibleInjection(session: SessionLike): boolean {
   try {
-    ;(ctx as unknown as Injectable).inject(['settings'], (c) => {
-      c.settings.installSection(ctx, NS, Config, entry, {
-        setSource: (get) => {
-          sourceOf = get
-        },
-        onChange: () => {},
-      })
-    })
+    const nodes = session.surface?.nodes
+    const eventAt = session.eventAt
+    if (!nodes || !eventAt) return false
+    for (const seq of Array.from(nodes)) {
+      const event = eventAt.call(session, seq) as
+        | { type?: string; data?: { source?: unknown } }
+        | undefined
+      if (event?.type !== 'user/message') continue
+      if (isOursSource(event.data?.source)) return true
+    }
   } catch {
-    // No settings service in this profile: run on composition config only.
+    return false // unreadable surface: prefer injecting over losing context
   }
+  return false
+}
 
-  // Which session-start scene fired last, per session. `agent/pre-step` has no
-  // scene concept, so the session-start listener records it and the pre-step
-  // listener consults it against `injectOn`. Sessions WITHOUT any recorded
-  // scene (long-lived sessions that never saw a session-start in this
-  // process — model switches, sessions created before the plugin activated)
-  // default to ALLOWED: the single-injection invariant is the only gate, so
-  // they get seeded exactly once on their next step.
+export function apply(ctx: Context, entry: Config): void {
+  // 0.1.7+: the loader owns configuration. The entry config IS the resolved
+  // value — user edits ride the profile patch, which reloads this fiber with
+  // the updated config. No installSection, no settings thunk.
+
+  // Which creation scene fired last, per session. `agent/pre-step` has no
+  // scene concept, so the `agent/created` listener records it and the
+  // pre-step listener consults it against `injectOn`. Sessions WITHOUT any
+  // recorded scene (long-lived sessions that never saw a creation event in
+  // this process — model switches, sessions created before the plugin
+  // activated) default to ALLOWED: they get seeded exactly once.
   const lastScene = new WeakMap<object, string>()
 
-  ctx.on('agent/session-start', (payload) => {
+  ctx.on('agent/created', (payload): undefined => {
     const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
-    if (scene === undefined) return
-    const allowed = sourceOf().injectOn.includes(scene)
+    if (scene === undefined) return undefined
+    // Compaction cleared the ledger so the surface scan alone decides
+    // whether a re-seed is due (block gone → inject, still visible → skip).
+    if (scene === 'compact') injectedSessions.delete(payload.agent.session)
+    const allowed = entry.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
+    return undefined
   })
 
-  // Converge to EXACTLY ONE injection per request, using the official
-  // skill-catalog replacement pattern: `decision.messages` is the complete
-  // request sequence (history surface + this step's admitted messages), so
-  // counting our messages there covers every case —
-  //   zero  → scene-gated append (fresh session, compaction cleared the old
-  //           block, never-injected active session, model switch, …)
-  //   one   → leave as is
-  //   many  → drop the stale ones, keep the newest (history redundancy from
-  //           older versions converges here too)
+  // At most one injection per session's visible history. Three guards,
+  // cheapest first: this step's batch (in case another path already added
+  // one), the process-local ledger (pre-persist window), and the durable
+  // surface scan (the authoritative cross-process answer).
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
-    const session = agent.session
-    const mine: number[] = []
-    for (let i = 0; i < decision.messages.length; i++) {
-      const src = (decision.messages[i] as { source?: { kind?: string; plugin?: string } }).source
-      if (src?.kind === 'plugin' && src?.plugin === name) mine.push(i)
-    }
-    if (mine.length > 1) {
-      const drop = new Set(mine.slice(0, -1))
-      ctx.logger.info('dsh-context-imports: converged %d stale injections to one', mine.length)
-      return { ...decision, messages: decision.messages.filter((_, i) => !drop.has(i)) }
-    }
-    if (mine.length === 1) return decision
+    const session = agent.session as SessionLike
+    const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
+    if (inBatch || injectedSessions.has(session) || hasVisibleInjection(session)) return decision
 
     const scene = lastScene.get(session) ?? 'active-session'
-    const cfg = sourceOf()
-    if (scene === 'suppressed' || !cfg.injectOn.includes(scene)) return decision
+    if (scene === 'suppressed' || !entry.injectOn.includes(scene)) return decision
     try {
       signal.throwIfAborted()
       const cwd = session.header?.cwd ?? process.cwd()
-      const bundle = await collectBundle(cfg, cwd)
-      // Explicit UI locale preference wins; otherwise follow the browser-resolved
-      // language synced by the client half; final fallback English.
-      const wrapper = wrapperFor(readLocalePreference(ctx) ?? (cfg.detectedLocale || undefined))
-      const text = renderBundle(cfg, bundle, wrapper)
+      const bundle = await collectBundle(entry, cwd)
+      // Wrapper language follows the browser-resolved locale synced into our
+      // own config by the client half; final fallback English.
+      const wrapper = wrapperFor(entry.detectedLocale || undefined)
+      const text = renderBundle(entry, bundle, wrapper)
       if (text === undefined) return decision
       const message = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: name, form: 'instructions' },
+        source: { kind: 'context-imports', form: 'instructions' },
       })
       // Placement: append to the END of the step's message list — the same
       // position the stock skill-catalog uses. Context injections from
@@ -347,6 +346,7 @@ export function apply(ctx: Context, entry: Config): void {
       // catalog, …) join AFTER our inner pass, so only the tail is
       // guaranteed to sit behind all of them. The model reads our expanded
       // files last, right after the instructions that reference them.
+      injectedSessions.add(session)
       ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (scene=%s)',
         bundle.sections.length, bundle.missing.length, bundle.omitted.length, scene)
       return {

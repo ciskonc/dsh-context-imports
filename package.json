@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-imports",
-  "version": "0.1.4",
+  "version": "0.2.1",
   "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
   "keywords": [
     "dsh-plugin",
@@ -61,7 +61,7 @@
       "patch": "./cordis.patch.yml"
     },
     "engines": {
-      "dsh": ">=0.1.5-rc.1"
+      "dsh": ">=0.1.7-rc.1"
     },
     "client": {
       "inject": [

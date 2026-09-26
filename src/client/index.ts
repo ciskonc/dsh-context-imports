@@ -1,25 +1,26 @@
 /**
- * @dsh-external/dsh-context-imports — client 设置卡片（settings.plugin.item slot）。
+ * dsh-context-imports — client 设置页（plugins.item slot，0.1.7 适配）。
  * 构建：npm run build:client（tsdown，产物 lib/client.js，ModuleLoader.load 注册）。
  *
- * 范式全部对齐官方 @deepseek-ai/dsh-client-ui-settings-plugins/lib/client.js：
- *  - apply 注册 zh/en 字典（register(ns, {zh,en})，L1703）
- *  - addLanguage + 单语言 register 注册 ja/fr/ru/ko（fallback 'en'）
- *  - controller 持 CardForm，inject() 返回 { hooks: { contextImportsCard: store }, ...actions }
- *  - keyed slot 注册：register({ name, key, locale, inject }, Component)（L1804-1809）
- *  ⚠️ register 必须带 name 字段；inject 数组声明服务依赖（cordis fiber inject）。
+ * 0.1.7 范式（对齐官方 dsh-client-ui-settings-agent-loop）：
+ *  - inject = ['slots','locale','configForms']（settingsScope 服务已移除）
+ *  - scope = ctx.configForms.get(NS)（SettingsFormScope：getSnapshot/subscribe/mutate）
+ *  - 表单模型 = 官方 SettingsFormModel（primitives），字段 spec 同形
+ *  - 页面注册 = configForms.whileServed([NS], () => slots.inject('plugins.item', ...))
+ *    （Host 不为该 loader entry 服务时页面自动消失）
  */
 import { ContextImportsCard, SOURCES } from './ContextImportsCard.tsx'
 import type { ContextImportsCardState, Translate } from './ContextImportsCard.tsx'
-import { boolField, CardForm, linesField, numberField, textField, tokensField } from './form.ts'
-import type { SettingsScopeLike, SnapshotStoreLike } from './form.ts'
+import { boolField, linesField, tokensField } from './form.ts'
+import type { FieldSpec } from './form.ts'
 import { en, fr, ja, ko, ru, zh } from './locales.ts'
+import { SettingsFormModel, settingsNumberField, settingsTextField } from '@deepseek-ai/dsh-client-ui-primitives'
 
-/** 设置命名空间（host 端 installSection 同名）。 */
+/** 设置命名空间 = loader entry id（0.1.7：settings 服务从 loader entries 投影）。 */
 const NS = 'dsh-context-imports'
 
 /* ------------------------------------------------------------------ *
- * ctx 服务的最小结构类型（官方服务；签名见 DECISION.md 引用文件）
+ * ctx 服务的最小结构类型（签名对齐官方 0.1.7 类型声明）
  * ------------------------------------------------------------------ */
 
 interface SlotsLike {
@@ -38,39 +39,48 @@ interface LocaleLike {
   subscribe(listener: () => void): () => void
 }
 
-interface SettingsScopeBinderLike {
-  bind(spec: { namespace: string }): SettingsScopeLike
+interface ConfigFormScopeLike {
+  getSnapshot(): { status: 'loading' | 'ready' | 'unavailable'; value?: Record<string, unknown> }
+  subscribe(listener: () => void): () => void
+  mutate(ops: readonly { op: 'set' | 'unset'; path: readonly string[]; value?: unknown }[]): Promise<boolean>
+}
+
+interface ConfigFormsLike {
+  get(entryId: string): ConfigFormScopeLike
+  /** 只在 Host 服务所列命名空间期间保持 factory 的注册。 */
+  whileServed(entryIds: string[], factory: () => unknown): () => void
 }
 
 interface ClientContext {
   slots: SlotsLike
   locale: LocaleLike
-  settingsScope: SettingsScopeBinderLike
+  configForms: ConfigFormsLike
   effect(factory: () => (() => void) | void, label?: string): void
 }
 
 /** 必需服务（cordis fiber inject 声明）。 */
-export const inject = ['slots', 'locale', 'settingsScope']
+export const inject = ['slots', 'locale', 'configForms']
 
 /* ------------------------------------------------------------------ *
- * 卡片 controller：把 dsh-context-imports scope 桥接到暂存表单
+ * 页面 controller：SettingsFormModel 桥接到暂存表单
  * ------------------------------------------------------------------ */
 
 class ContextImportsCardController {
-  private form: CardForm
-  private store: SnapshotStoreLike<ContextImportsCardState>
+  private form: SettingsFormModel<Record<string, unknown>>
+  private store: ReturnType<SettingsFormModel<Record<string, unknown>>['bind']>
 
-  constructor(scope: SettingsScopeLike) {
-    this.form = new CardForm(scope, [
+  constructor(scope: ConfigFormScopeLike) {
+    const specs: FieldSpec[] = [
       linesField('files'),
       boolField('scanImports'),
       linesField('instructionFiles'),
-      numberField('maxDepth'),
-      numberField('maxFileBytes'),
-      numberField('maxTotalBytes'),
+      settingsNumberField('maxDepth') as unknown as FieldSpec,
+      settingsNumberField('maxFileBytes') as unknown as FieldSpec,
+      settingsNumberField('maxTotalBytes') as unknown as FieldSpec,
       tokensField('injectOn', SOURCES),
-      textField('template'),
-    ])
+      settingsTextField('template') as unknown as FieldSpec,
+    ]
+    this.form = new SettingsFormModel(scope as never, specs as never)
     this.store = this.form.bind(() => this.projection())
   }
 
@@ -94,6 +104,10 @@ class ContextImportsCardController {
       hooks: { contextImportsCard: this.store },
       ...this.form.actions(),
     }
+  }
+
+  dispose(): void {
+    this.form.dispose()
   }
 }
 
@@ -131,38 +145,44 @@ export function apply(ctx: ClientContext): void {
     }, `dsh-context-imports: ${pack.id} dictionary`)
   }
 
-  const scope = ctx.settingsScope.bind({ namespace: NS })
+  const scope = ctx.configForms.get(NS)
   const card = new ContextImportsCardController(scope)
+  ctx.effect(() => () => card.dispose(), 'dsh-context-imports: form subscription')
 
-  // 把浏览器解析后的活跃语言写进我们自己的命名空间（detectedLocale），
-  // 供 host 半在用户未显式设置语言偏好时跟随 UI 语言。官方 locale 命名空间的
-  // preference 未设置时宿主读不到浏览器语言，这是唯一的跨端通道。
+  // 把浏览器解析后的活跃语言写进我们自己的配置字段（detectedLocale），
+  // 供 host 半跟随 UI 语言包装注入文本。
   let lastSynced = ''
   const syncDetectedLocale = () => {
     const active = ctx.locale.getSnapshot().active
     if (!active || active === lastSynced) return
     lastSynced = active
-    void Promise.resolve(scope.set('detectedLocale', active)).catch(() => {
-      lastSynced = ''
-    })
+    void scope
+      .mutate([{ op: 'set', path: ['detectedLocale'], value: active }])
+      .catch(() => {
+        lastSynced = ''
+      })
   }
   ctx.effect(() => ctx.locale.subscribe(syncDetectedLocale), 'dsh-context-imports: locale sync')
   syncDetectedLocale()
 
-  // keyed slot：ConfigurablePluginsTab 按 Host 服务的命名空间派发（key = ns）。
+  // 页面只在 Host 服务本命名空间（loader entry 活着）期间出现。
   ctx.effect(
     () =>
-      ctx.slots.inject('settings.plugin.item', () =>
-        ctx.slots.register(
-          {
-            name: 'settings.plugin.item',
-            key: NS,
-            locale: NS,
-            inject: () => card.inject(),
-          },
-          ContextImportsCard,
+      ctx.configForms.whileServed([NS], () =>
+        ctx.slots.inject('plugins.item', () =>
+          ctx.slots.register(
+            {
+              name: 'plugins.item',
+              id: 'dsh-context-imports',
+              order: 30,
+              label: () => ctx.locale.bind(NS)('title'),
+              locale: NS,
+              inject: () => card.inject(),
+            },
+            ContextImportsCard,
+          ),
         ),
       ),
-    'dsh-context-imports: settings card',
+    'dsh-context-imports: settings page',
   )
 }
