@@ -92,7 +92,7 @@ npm run build:client
 
 | Plugin version | DeepSeek Harness | Notes |
 |---|---|---|
-| **0.2.x** | **≥ 0.1.7-rc.1**（tested on 0.1.7-rc.2） | Current line. Built on the 0.1.7 APIs: `agent/created`, loader-projected settings, `configForms`, a custom message-source kind |
+| **0.2.x** | **≥ 0.1.7-rc.1**（tested on 0.1.7-rc.2 and 0.2.0-rc.1） | Current line. Built on the 0.1.7 APIs: `agent/created`, loader-projected settings, `configForms`, a custom message-source kind |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（tested on 0.1.5-rc.2/rc.3） | Legacy line. **Does not work on 0.1.7** — it waits on the removed `settingsScope` service and the removed `agent/session-start` event |
 
 Each release note names the DSH version it was tested against.
