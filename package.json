@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-imports",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
   "keywords": [
     "dsh-plugin",
@@ -65,7 +65,9 @@
     },
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
       ],
       "platform": "web"
     }

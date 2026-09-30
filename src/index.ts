@@ -56,15 +56,18 @@ export interface Config {
 }
 
 export const Config = z.object({
-  files: z.array(z.string()).default([]),
-  scanImports: z.boolean().default(true),
-  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']),
-  maxDepth: z.number().default(3),
-  maxFileBytes: z.number().default(64 * 1024),
-  maxTotalBytes: z.number().default(128 * 1024),
-  injectOn: z.array(z.string()).default([...SOURCES]),
-  template: z.string().default(''),
-  detectedLocale: z.string().default(''),
+  // Every field is `.volatile()`: the settings describe projection only
+  // serves namespaces whose schema has at least one volatile field, and
+  // without one the plugin's settings page never mounts (verified 0.2.0-rc.1).
+  files: z.array(z.string()).default([]).volatile(),
+  scanImports: z.boolean().default(true).volatile(),
+  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']).volatile(),
+  maxDepth: z.number().default(3).volatile(),
+  maxFileBytes: z.number().default(64 * 1024).volatile(),
+  maxTotalBytes: z.number().default(128 * 1024).volatile(),
+  injectOn: z.array(z.string()).default([...SOURCES]).volatile(),
+  template: z.string().default('').volatile(),
+  detectedLocale: z.string().default('').volatile(),
 })
 
 /* ------------------------------------------------------------------ *
@@ -253,7 +256,14 @@ interface SessionLike {
   eventAt?(seq: number): unknown
 }
 
-/** Sessions this process already injected into (guards the pre-persist window). */
+/**
+ * Sessions this process already injected into. Guards only the window where
+ * the durable surface cannot answer yet (unreadable surface): once the
+ * surface is readable it is the sole authority — a ledger entry without a
+ * visible injection is stale (the block was compacted away) and MUST NOT
+ * block re-seeding. Note: 0.2.0 compaction runs in place on the live agent,
+ * so no `agent/created` scene fires to clear this set (verified 0.2.0-rc.1).
+ */
 const injectedSessions = new WeakSet<object>()
 
 /** True for our own message sources: 0.2.0+ kind plus the legacy 0.1.x shape. */
@@ -264,30 +274,34 @@ function isOursSource(src: unknown): boolean {
 }
 
 /**
- * True when one of our injections is visible on the session's live surface.
+ * Whether one of our injections is visible on the session's live surface.
  *
  * `decision.messages` in pre-step is only this step's admitted batch — it
  * does NOT contain history, so counting there can never answer "already
  * injected". The durable surface is the right source: an injection visible
  * on it means the model sees it; a block compaction replaced out of the
  * surface no longer counts and re-seeding is allowed again.
+ *
+ * Tri-state because an unreadable surface must not be confused with an
+ * empty one: 'unknown' keeps the process ledger as fallback, 'absent'
+ * overrides it.
  */
-function hasVisibleInjection(session: SessionLike): boolean {
+function surfaceInjectionState(session: SessionLike): 'visible' | 'absent' | 'unknown' {
   try {
     const nodes = session.surface?.nodes
     const eventAt = session.eventAt
-    if (!nodes || !eventAt) return false
+    if (!nodes || !eventAt) return 'unknown'
     for (const seq of Array.from(nodes)) {
       const event = eventAt.call(session, seq) as
         | { type?: string; data?: { source?: unknown } }
         | undefined
       if (event?.type !== 'user/message') continue
-      if (isOursSource(event.data?.source)) return true
+      if (isOursSource(event.data?.source)) return 'visible'
     }
+    return 'absent'
   } catch {
-    return false // unreadable surface: prefer injecting over losing context
+    return 'unknown' // unreadable surface: the ledger decides
   }
-  return false
 }
 
 export function apply(ctx: Context, entry: Config): void {
@@ -306,8 +320,10 @@ export function apply(ctx: Context, entry: Config): void {
   ctx.on('agent/created', (payload): undefined => {
     const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
     if (scene === undefined) return undefined
-    // Compaction cleared the ledger so the surface scan alone decides
-    // whether a re-seed is due (block gone → inject, still visible → skip).
+    // Belt and braces: if a compact scene ever fires, drop the ledger so the
+    // surface scan alone decides whether a re-seed is due. In-place
+    // compaction (the 0.2.0 /compact path) never re-announces the agent, so
+    // the pre-step gate treats a surface-absent ledger entry as stale anyway.
     if (scene === 'compact') injectedSessions.delete(payload.agent.session)
     const allowed = entry.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
@@ -316,14 +332,20 @@ export function apply(ctx: Context, entry: Config): void {
 
   // At most one injection per session's visible history. Three guards,
   // cheapest first: this step's batch (in case another path already added
-  // one), the process-local ledger (pre-persist window), and the durable
-  // surface scan (the authoritative cross-process answer).
+  // one), the durable surface scan (the authoritative cross-process
+  // answer), and the process-local ledger (only when the surface cannot
+  // be read). A ledger entry whose injection is no longer on the surface
+  // is stale — compaction replaced the block in place — and re-seeding
+  // is due.
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const session = agent.session as SessionLike
     const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
-    if (inBatch || injectedSessions.has(session) || hasVisibleInjection(session)) return decision
+    if (inBatch) return decision
+    const surface = surfaceInjectionState(session)
+    if (surface === 'visible') return decision
+    if (surface === 'unknown' && injectedSessions.has(session)) return decision
 
     const scene = lastScene.get(session) ?? 'active-session'
     if (scene === 'suppressed' || !entry.injectOn.includes(scene)) return decision
