@@ -305,6 +305,16 @@ function surfaceInjectionState(session: SessionLike): 'visible' | 'absent' | 'un
 }
 
 export function apply(ctx: Context, entry: Config): void {
+  // Defensive normalization for `injectOn` (2026-10-09): declared string[] but can
+  // arrive as a comma-separated string via some config write paths; a raw
+  // `entry.injectOn.includes(...)` threw `TypeError: includes is not a function`
+  // and failed the entire session-create. Normalize any shape to string[].
+  const injectOnSceneList = (entry: Config): string[] => {
+    const raw = entry.injectOn as unknown
+    if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string')
+    if (typeof raw === 'string') return raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
+    return [...SOURCES]
+  }
   // 0.1.7+: the loader owns configuration. The entry config IS the resolved
   // value — user edits ride the profile patch, which reloads this fiber with
   // the updated config. No installSection, no settings thunk.
@@ -325,7 +335,7 @@ export function apply(ctx: Context, entry: Config): void {
     // compaction (the 0.2.0 /compact path) never re-announces the agent, so
     // the pre-step gate treats a surface-absent ledger entry as stale anyway.
     if (scene === 'compact') injectedSessions.delete(payload.agent.session)
-    const allowed = entry.injectOn.includes(scene)
+    const allowed = injectOnSceneList(entry).includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
     return undefined
   })
@@ -348,7 +358,7 @@ export function apply(ctx: Context, entry: Config): void {
     if (surface === 'unknown' && injectedSessions.has(session)) return decision
 
     const scene = lastScene.get(session) ?? 'active-session'
-    if (scene === 'suppressed' || !entry.injectOn.includes(scene)) return decision
+    if (scene === 'suppressed' || !injectOnSceneList(entry).includes(scene)) return decision
     try {
       signal.throwIfAborted()
       const cwd = session.header?.cwd ?? process.cwd()
