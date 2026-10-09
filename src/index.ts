@@ -304,20 +304,41 @@ function surfaceInjectionState(session: SessionLike): 'visible' | 'absent' | 'un
   }
 }
 
-export function apply(ctx: Context, entry: Config): void {
-  // Defensive normalization for `injectOn` (2026-10-09): declared string[] but can
-  // arrive as a comma-separated string via some config write paths; a raw
-  // `entry.injectOn.includes(...)` threw `TypeError: includes is not a function`
-  // and failed the entire session-create. Normalize any shape to string[].
-  const injectOnSceneList = (entry: Config): string[] => {
-    const raw = entry.injectOn as unknown
-    if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string')
-    if (typeof raw === 'string') return raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
-    return [...SOURCES]
+/**
+ * Normalize the resolved entry config. Every field is `.volatile()` (required
+ * for the settings page to mount), and since DSH 0.2.0-rc.2 the volatile
+ * projection NO LONGER fills schema defaults into the entry value — every
+ * field can arrive undefined (verified 0.2.0-rc.2: `cfg.files is not
+ * iterable` / `entry.injectOn.includes is not a function`). Normalize each
+ * field to its declared type with the schema default as fallback.
+ */
+function normalizeConfig(entry: Config): Config {
+  const e = entry as Partial<Config>
+  const strList = (v: unknown, fallback: string[]): string[] => {
+    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string')
+    if (typeof v === 'string') return v.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
+    return fallback
   }
+  const num = (v: unknown, fallback: number): number =>
+    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback
+  return {
+    files: strList(e.files, []),
+    scanImports: typeof e.scanImports === 'boolean' ? e.scanImports : true,
+    instructionFiles: strList(e.instructionFiles, ['AGENTS.md', 'CLAUDE.md']),
+    maxDepth: num(e.maxDepth, 3),
+    maxFileBytes: num(e.maxFileBytes, 64 * 1024),
+    maxTotalBytes: num(e.maxTotalBytes, 128 * 1024),
+    injectOn: strList(e.injectOn, [...SOURCES]).filter((s) => (SOURCES as readonly string[]).includes(s)),
+    template: typeof e.template === 'string' ? e.template : '',
+    detectedLocale: typeof e.detectedLocale === 'string' ? e.detectedLocale : '',
+  }
+}
+
+export function apply(ctx: Context, entry: Config): void {
   // 0.1.7+: the loader owns configuration. The entry config IS the resolved
   // value — user edits ride the profile patch, which reloads this fiber with
   // the updated config. No installSection, no settings thunk.
+  const cfg = normalizeConfig(entry)
 
   // Which creation scene fired last, per session. `agent/pre-step` has no
   // scene concept, so the `agent/created` listener records it and the
@@ -335,7 +356,7 @@ export function apply(ctx: Context, entry: Config): void {
     // compaction (the 0.2.0 /compact path) never re-announces the agent, so
     // the pre-step gate treats a surface-absent ledger entry as stale anyway.
     if (scene === 'compact') injectedSessions.delete(payload.agent.session)
-    const allowed = injectOnSceneList(entry).includes(scene)
+    const allowed = cfg.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
     return undefined
   })
@@ -358,15 +379,13 @@ export function apply(ctx: Context, entry: Config): void {
     if (surface === 'unknown' && injectedSessions.has(session)) return decision
 
     const scene = lastScene.get(session) ?? 'active-session'
-    if (scene === 'suppressed' || !injectOnSceneList(entry).includes(scene)) return decision
+    if (scene === 'suppressed' || !cfg.injectOn.includes(scene)) return decision
     try {
       signal.throwIfAborted()
       const cwd = session.header?.cwd ?? process.cwd()
-      const bundle = await collectBundle(entry, cwd)
-      // Wrapper language follows the browser-resolved locale synced into our
-      // own config by the client half; final fallback English.
-      const wrapper = wrapperFor(entry.detectedLocale || undefined)
-      const text = renderBundle(entry, bundle, wrapper)
+      const bundle = await collectBundle(cfg, cwd)
+      const wrapper = wrapperFor(cfg.detectedLocale || undefined)
+      const text = renderBundle(cfg, bundle, wrapper)
       if (text === undefined) return decision
       const message = createUserMessage({
         content: [{ type: 'text', text }],
