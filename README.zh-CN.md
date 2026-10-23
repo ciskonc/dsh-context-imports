@@ -90,7 +90,7 @@ npm run build:client
 
 | 插件版本 | DeepSeek Harness | 说明 |
 |---|---|---|
-| **0.2.3+** | **≥ 0.1.7-rc.1**（0.2.3 实测 0.2.0-rc.1 与 0.2.0-rc.2） | 当前线。基于 0.1.7 的 API：`agent/created`、loader 投影设置、`configForms`、自定义消息 source kind。0.2.3 加固配置读取：DSH ≥ 0.2.0-rc.2 起 volatile 配置投影不再填充 schema 默认值，入口处对全部字段归一化（0.2.2 在该版本上可能崩溃会话创建或静默不注入） |
+| **0.2.3+** | **≥ 0.1.7-rc.1**（0.2.3 实测 0.2.0-rc.1、0.2.0-rc.2 与 0.2.1-rc.2） | 当前线。基于 0.1.7 的 API：`agent/created`、loader 投影设置、`configForms`、自定义消息 source kind。0.2.3 加固配置读取：DSH ≥ 0.2.0-rc.2 起 volatile 配置投影不再填充 schema 默认值，入口处对全部字段归一化（0.2.2 在该版本上可能崩溃会话创建或静默不注入）。注意：DSH ≥ 0.2.0-rc.2 起只能用 `dsh plugin add` 安装——loader 会校验 lockfile 一致性，手拷 node_modules 会被静默丢弃 |
 | 0.2.0 – 0.2.2 | ≥ 0.1.7-rc.1（0.2.1 实测 0.1.7-rc.2 与 0.2.0-rc.1；0.2.2 实测 0.2.0-rc.1） | 0.2.2 修复压缩后不重注入与设置页挂载，但在 DSH ≥ 0.2.0-rc.2 上可能崩溃会话创建（`injectOn.includes is not a function`）或静默不注入（`cfg.files is not iterable`）——请升级 0.2.3 |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（实测 0.1.5-rc.2/rc.3） | 旧线。**不支持 0.1.7**——它依赖已被移除的 `settingsScope` 服务和 `agent/session-start` 事件 |
 

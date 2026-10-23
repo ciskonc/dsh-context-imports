@@ -92,7 +92,7 @@ npm run build:client
 
 | Plugin version | DeepSeek Harness | Notes |
 |---|---|---|
-| **0.2.3+** | **≥ 0.1.7-rc.1**（0.2.3 tested on 0.2.0-rc.1 and 0.2.0-rc.2） | Current line. Built on the 0.1.7 APIs: `agent/created`, loader-projected settings, `configForms`, a custom message-source kind. 0.2.3 hardens config access: on DSH ≥ 0.2.0-rc.2 the volatile config projection no longer fills schema defaults, so every field is normalized at entry (0.2.2 could crash session creation or silently skip injection there) |
+| **0.2.3+** | **≥ 0.1.7-rc.1**（0.2.3 tested on 0.2.0-rc.1, 0.2.0-rc.2 and 0.2.1-rc.2） | Current line. Built on the 0.1.7 APIs: `agent/created`, loader-projected settings, `configForms`, a custom message-source kind. 0.2.3 hardens config access: on DSH ≥ 0.2.0-rc.2 the volatile config projection no longer fills schema defaults, so every field is normalized at entry (0.2.2 could crash session creation or silently skip injection there). Note: on DSH ≥ 0.2.0-rc.2 install via `dsh plugin add` only — the loader verifies lockfile consistency, hand-copied node_modules are silently dropped |
 | 0.2.0 – 0.2.2 | ≥ 0.1.7-rc.1（0.2.1 tested on 0.1.7-rc.2 and 0.2.0-rc.1; 0.2.2 tested on 0.2.0-rc.1） | 0.2.2 fixed re-injection after compaction and settings-page mounting, but on DSH ≥ 0.2.0-rc.2 it can crash session creation (`injectOn.includes is not a function`) or silently skip injection (`cfg.files is not iterable`) — upgrade to 0.2.3 |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（tested on 0.1.5-rc.2/rc.3） | Legacy line. **Does not work on 0.1.7** — it waits on the removed `settingsScope` service and the removed `agent/session-start` event |
 
