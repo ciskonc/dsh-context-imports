@@ -53,8 +53,9 @@ The injected message is a `<system-reminder>` containing `<file path="...">` blo
 ## Features
 
 - Expands `@path` imports recursively. Default depth is 3; import cycles and duplicates are collapsed.
+- Follows the imports of every instruction file the harness loaded — including a project's AGENTS.md it picks up mid-session once the agent touches files under it.
 - Triggers on new sessions, resume, clear, and after compaction. Each scene can be turned off.
-- Keeps exactly one injection in the active history. After compaction removes it, the next session start injects again.
+- Never sends the same file twice: a file already in the model's context is left alone, and a newly loaded instruction file adds exactly its own imported files.
 - Six-language settings card (zh, en, ja, fr, ru, ko) under Settings, Plugins, Plugin configuration. Every option is editable there and applies without a reload.
 - Byte budgets per file and in total. Missing files are reported, never fatal.
 - Uses the official API surface only: cordis events, `createUserMessage` from dsh-llm, a schemastery config, and the optional dsh-settings namespace. No feature-plugin dependencies.
@@ -66,6 +67,7 @@ The injected message is a `<system-reminder>` containing `<file path="...">` blo
 | `files` | `[]` | Extra files to inject, relative to the session working directory or absolute |
 | `scanImports` | `true` | Scan AGENTS.md and the other instruction files for @imports |
 | `instructionFiles` | `["AGENTS.md", "CLAUDE.md"]` | Files to scan. They are never re-injected themselves |
+| `expandLoadedInstructions` | `true` | Also follow the imports of the instruction files the harness itself loaded, including a project AGENTS.md it brought in mid-session |
 | `maxDepth` | `3` | How many levels of nested imports to follow |
 | `maxFileBytes` | `65536` | Per-file cap in bytes; larger files are truncated |
 | `maxTotalBytes` | `131072` | Total budget; files beyond it are skipped with a note |
@@ -92,7 +94,8 @@ npm run build:client
 
 | Plugin version | DeepSeek Harness | Notes |
 |---|---|---|
-| **0.2.3+** | **≥ 0.1.7-rc.1**（0.2.3 tested on 0.2.0-rc.1, 0.2.0-rc.2 and 0.2.1-rc.2） | Current line. Built on the 0.1.7 APIs: `agent/created`, loader-projected settings, `configForms`, a custom message-source kind. 0.2.3 hardens config access: on DSH ≥ 0.2.0-rc.2 the volatile config projection no longer fills schema defaults, so every field is normalized at entry (0.2.2 could crash session creation or silently skip injection there). Note: on DSH ≥ 0.2.0-rc.2 install via `dsh plugin add` only — the loader verifies lockfile consistency, hand-copied node_modules are silently dropped |
+| **0.3.0+** | **≥ 0.2.0-rc.1**（0.3.0 tested on 0.2.1-rc.2） | Current line. Adds `expandLoadedInstructions`: the imports of every instruction file the harness loaded are expanded, including a project AGENTS.md it brings in mid-session. Injection is incremental — a file already in the context is never sent twice. Needs the host's published instruction scopes (`agent-instructions` message source + `agent.inbox.nextStep`), so it targets DSH ≥ 0.2.0 |
+| 0.2.3 | ≥ 0.1.7-rc.1（tested on 0.2.0-rc.1, 0.2.0-rc.2 and 0.2.1-rc.2） | Config access hardened: on DSH ≥ 0.2.0-rc.2 the volatile config projection no longer fills schema defaults, so every field is normalized at entry (0.2.2 could crash session creation or silently skip injection there). Note: on DSH ≥ 0.2.0-rc.2 install via `dsh plugin add` only — the loader verifies lockfile consistency, hand-copied node_modules are silently dropped |
 | 0.2.0 – 0.2.2 | ≥ 0.1.7-rc.1（0.2.1 tested on 0.1.7-rc.2 and 0.2.0-rc.1; 0.2.2 tested on 0.2.0-rc.1） | 0.2.2 fixed re-injection after compaction and settings-page mounting, but on DSH ≥ 0.2.0-rc.2 it can crash session creation (`injectOn.includes is not a function`) or silently skip injection (`cfg.files is not iterable`) — upgrade to 0.2.3 |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（tested on 0.1.5-rc.2/rc.3） | Legacy line. **Does not work on 0.1.7** — it waits on the removed `settingsScope` service and the removed `agent/session-start` event |
 
