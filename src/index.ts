@@ -289,8 +289,6 @@ interface SessionLike {
   header?: { cwd?: string }
   surface?: { nodes: ArrayLike<number> }
   eventAt?(seq: number): unknown
-  /** The agent's pending inbox — where the host parks a freshly loaded instruction file. */
-  inbox?: { nextStep?: readonly unknown[] }
 }
 
 interface SurfaceEvent {
@@ -357,6 +355,7 @@ function collectLoadedInstructions(
   session: SessionLike,
   cwd: string,
   batch: readonly unknown[] = [],
+  inbox: readonly unknown[] = [],
 ): LoadedInstruction[] {
   let projectRootRel = ''
   const scopes = new Map<string, { dir: string; candidate: string }>()
@@ -390,10 +389,10 @@ function collectLoadedInstructions(
 
   // The host composes a newly loaded instruction file into the CURRENT step's
   // message batch; the durable surface only catches up after that step ends.
-  // The host parks the fresh message in the agent's inbox until it splices it
+  // The host parks the fresh message in the AGENT's inbox until it splices it
   // in, so the inbox is the earliest place the new scope is visible — read
   // all three: inbox (just loaded), batch (this step), surface (earlier).
-  for (const message of session.inbox?.nextStep ?? []) {
+  for (const message of inbox) {
     absorb((message as { source?: unknown })?.source)
   }
   for (const message of batch) {
@@ -581,6 +580,7 @@ export function apply(ctx: Context, entry: Config): void {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const session = agent.session as SessionLike
+    const inboxNextStep = (agent as { inbox?: { nextStep?: readonly unknown[] } }).inbox?.nextStep ?? []
     const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
     if (inBatch) return decision
 
@@ -595,7 +595,7 @@ export function apply(ctx: Context, entry: Config): void {
       // own config by the client half; final fallback English.
       const wrapper = wrapperFor(cfg.detectedLocale || undefined)
       const loaded = cfg.expandLoadedInstructions
-        ? collectLoadedInstructions(session, cwd, decision.messages)
+        ? collectLoadedInstructions(session, cwd, decision.messages, inboxNextStep)
         : []
       const bundle = await collectBundle(cfg, cwd, loaded, already, wrapper)
       const text = renderBundle(cfg, bundle)

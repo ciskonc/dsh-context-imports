@@ -92,7 +92,8 @@ npm run build:client
 
 | 插件版本 | DeepSeek Harness | 说明 |
 |---|---|---|
-| **0.3.0+** | **≥ 0.2.0-rc.1**（0.3.0 实测 0.2.1-rc.2） | 当前线。新增 `expandLoadedInstructions`：展开 DSH 已加载的所有指令文件里的引用，包括会话中途自动带进来的项目 AGENTS.md；注入改为增量式——已在上下文里的文件不再重复发送。依赖宿主发布的指令作用域信息（`agent-instructions` 消息 source + `agent.inbox.nextStep`），故面向 DSH ≥ 0.2.0 |
+| **0.3.1+** | **≥ 0.2.0-rc.1**（0.3.1 实测 0.2.1-rc.2 与 0.2.1-rc.3） | 当前线。新增 `expandLoadedInstructions`：展开 DSH 已加载的所有指令文件里的引用，包括会话中途自动带进来的项目 AGENTS.md；注入改为增量式——已在上下文里的文件不再重复发送。依赖宿主发布的指令作用域信息（`agent-instructions` 消息 source + `agent.inbox.nextStep`），故面向 DSH ≥ 0.2.0 |
+| 0.3.0 | ≥ 0.2.0-rc.1（实测 0.2.1-rc.2） | 同一功能，但 inbox 取值读成了 `session.inbox`（应为 `agent.inbox`），那条路径从未生效——实际靠「本轮消息批次」路径撑起。0.3.1 已修 |
 | 0.2.3 | ≥ 0.1.7-rc.1（实测 0.2.0-rc.1、0.2.0-rc.2 与 0.2.1-rc.2） | 配置读取加固：DSH ≥ 0.2.0-rc.2 起 volatile 配置投影不再填充 schema 默认值，入口处对全部字段归一化（0.2.2 在该版本上可能崩溃会话创建或静默不注入）。注意：DSH ≥ 0.2.0-rc.2 起只能用 `dsh plugin add` 安装——loader 会校验 lockfile 一致性，手拷 node_modules 会被静默丢弃 |
 | 0.2.0 – 0.2.2 | ≥ 0.1.7-rc.1（0.2.1 实测 0.1.7-rc.2 与 0.2.0-rc.1；0.2.2 实测 0.2.0-rc.1） | 0.2.2 修复压缩后不重注入与设置页挂载，但在 DSH ≥ 0.2.0-rc.2 上可能崩溃会话创建（`injectOn.includes is not a function`）或静默不注入（`cfg.files is not iterable`）——请升级 0.2.3 |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（实测 0.1.5-rc.2/rc.3） | 旧线。**不支持 0.1.7**——它依赖已被移除的 `settingsScope` 服务和 `agent/session-start` 事件 |
