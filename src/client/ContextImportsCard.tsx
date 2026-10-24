@@ -36,6 +36,7 @@ export interface ContextImportsCardState {
   failed: boolean
   files: FieldState
   scanImports: FieldState
+  expandLoadedInstructions: FieldState
   instructionFiles: FieldState
   maxDepth: FieldState
   maxFileBytes: FieldState
@@ -145,6 +146,14 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
         state={state.scanImports}
         disabled={!state.writable}
         onEdit={(text) => props.edit('scanImports', text)}
+      />
+      <BoolField
+        id="plugin-config-context-imports-expand-loaded"
+        label={t('expandLoadedInstructions')}
+        hint={t('expandLoadedInstructionsHint')}
+        state={state.expandLoadedInstructions}
+        disabled={!state.writable}
+        onEdit={(text) => props.edit('expandLoadedInstructions', text)}
       />
       <SettingsValueField
         {...fieldProps(

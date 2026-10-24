@@ -73,6 +73,7 @@ class ContextImportsCardController {
     const specs: FieldSpec[] = [
       linesField('files'),
       boolField('scanImports'),
+      boolField('expandLoadedInstructions'),
       linesField('instructionFiles'),
       settingsNumberField('maxDepth') as unknown as FieldSpec,
       settingsNumberField('maxFileBytes') as unknown as FieldSpec,
@@ -89,6 +90,7 @@ class ContextImportsCardController {
       ...this.form.shell(),
       files: this.form.field('files'),
       scanImports: this.form.field('scanImports'),
+      expandLoadedInstructions: this.form.field('expandLoadedInstructions'),
       instructionFiles: this.form.field('instructionFiles'),
       maxDepth: this.form.field('maxDepth'),
       maxFileBytes: this.form.field('maxFileBytes'),

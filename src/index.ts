@@ -12,7 +12,8 @@
  * settings registration needed.
  */
 import { readFile } from 'node:fs/promises'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent' // pulls the cordis Events augmentation (agent/created, agent/pre-step)
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -41,6 +42,13 @@ export interface Config {
   scanImports: boolean
   /** Instruction file candidates to scan (content NOT re-injected: the stock agent-instructions plugin owns them). */
   instructionFiles: string[]
+  /**
+   * Expand the imports of every instruction file the HOST has loaded — not
+   * only the ones next to the session cwd. The host loads a project's
+   * AGENTS.md mid-session once the agent touches files under it, and that
+   * file's `@import` targets would otherwise never reach the model.
+   */
+  expandLoadedInstructions: boolean
   /** Maximum @import recursion depth. */
   maxDepth: number
   /** Per-file byte cap. */
@@ -62,6 +70,7 @@ export const Config = z.object({
   files: z.array(z.string()).default([]).volatile(),
   scanImports: z.boolean().default(true).volatile(),
   instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']).volatile(),
+  expandLoadedInstructions: z.boolean().default(true).volatile(),
   maxDepth: z.number().default(3).volatile(),
   maxFileBytes: z.number().default(64 * 1024).volatile(),
   maxTotalBytes: z.number().default(128 * 1024).volatile(),
@@ -141,18 +150,6 @@ function findImports(text: string): string[] {
   return out
 }
 
-interface Section {
-  path: string
-  content: string
-  truncatedAt?: number
-}
-
-interface Bundle {
-  sections: Section[]
-  missing: string[]
-  omitted: string[]
-}
-
 interface QueueItem {
   abs: string
   rel: string
@@ -161,12 +158,34 @@ interface QueueItem {
   scanOnly: boolean
 }
 
-async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
+/** One instruction file the host has loaded, with its absolute path. */
+interface LoadedInstruction {
+  abs: string
+  /** Path as the host displays it (project-root relative). */
+  rel: string
+}
+
+interface Bundle {
+  /** Rendered blocks, ready to be wrapped. */
+  blocks: string[]
+  fileCount: number
+  missingCount: number
+  omittedCount: number
+}
+
+async function collectBundle(
+  cfg: Config,
+  cwd: string,
+  extraInstructions: LoadedInstruction[],
+  already: Set<string>,
+  wrapper: Wrapper,
+): Promise<Bundle> {
   const seen = new Set<string>()
   const queue: QueueItem[] = []
-  const sections: Section[] = []
-  const missing: string[] = []
-  const omitted: string[] = []
+  const blocks: string[] = []
+  let fileCount = 0
+  let missingCount = 0
+  let omittedCount = 0
   let total = 0
 
   const enqueue = (abs: string, rel: string, depth: number, scanOnly: boolean) => {
@@ -181,8 +200,16 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
     enqueue(isAbsolute(f) ? f : resolve(cwd, f), f, 0, false)
   }
   if (cfg.scanImports) {
+    // The cwd-level candidates keep the plugin working when the host has not
+    // published any instruction scope (and after a compaction replaced the
+    // host's own instruction messages).
     for (const f of cfg.instructionFiles) {
       enqueue(resolve(cwd, f), f, 0, true)
+    }
+    // Instruction files the HOST loaded — including a project's AGENTS.md
+    // spliced in mid-session because the agent touched files under it.
+    for (const instruction of extraInstructions) {
+      enqueue(instruction.abs, instruction.rel, 0, true)
     }
   }
 
@@ -192,7 +219,13 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
     try {
       raw = await readFile(item.abs)
     } catch {
-      if (!item.scanOnly) missing.push(item.rel)
+      if (!item.scanOnly) {
+        const note = `[${wrapper.missing}] ${item.rel}`
+        if (!already.has(note)) {
+          blocks.push(note)
+          missingCount++
+        }
+      }
       continue
     }
     let truncatedAt: number | undefined
@@ -211,32 +244,34 @@ async function collectBundle(cfg: Config, cwd: string): Promise<Bundle> {
     }
 
     if (item.scanOnly) continue
+    const truncation = truncatedAt !== undefined ? `\n[${wrapper.truncated} ${truncatedAt} bytes]` : ''
+    const block = `<file path="${item.rel}">\n${text}${truncation}\n</file>`
+    // Already in the model's context (previous step, previous process, or an
+    // earlier incremental injection): never send it twice.
+    if (already.has(block)) continue
     if (total + raw.byteLength > cfg.maxTotalBytes) {
-      omitted.push(item.rel)
+      const note = `[${wrapper.omitted}] ${item.rel}`
+      if (!already.has(note)) {
+        blocks.push(note)
+        omittedCount++
+      }
       continue
     }
     total += raw.byteLength
-    sections.push({ path: item.rel, content: text, truncatedAt })
+    blocks.push(block)
+    fileCount++
   }
 
-  return { sections, missing, omitted }
+  return { blocks, fileCount, missingCount, omittedCount }
 }
 
 /* ------------------------------------------------------------------ *
  * Rendering
  * ------------------------------------------------------------------ */
 
-function renderBundle(cfg: Config, bundle: Bundle, wrapper: Wrapper): string | undefined {
-  if (bundle.sections.length === 0 && bundle.missing.length === 0) return undefined
-
-  const parts: string[] = []
-  for (const s of bundle.sections) {
-    const note = s.truncatedAt !== undefined ? `\n[${wrapper.truncated} ${s.truncatedAt} bytes]` : ''
-    parts.push(`<file path="${s.path}">\n${s.content}${note}\n</file>`)
-  }
-  for (const m of bundle.missing) parts.push(`[${wrapper.missing}] ${m}`)
-  for (const o of bundle.omitted) parts.push(`[${wrapper.omitted}] ${o}`)
-  const content = parts.join('\n\n')
+function renderBundle(cfg: Config, bundle: Bundle): string | undefined {
+  if (bundle.blocks.length === 0) return undefined
+  const content = bundle.blocks.join('\n\n')
 
   const template = cfg.template.trim()
   if (template.length > 0) {
@@ -254,17 +289,190 @@ interface SessionLike {
   header?: { cwd?: string }
   surface?: { nodes: ArrayLike<number> }
   eventAt?(seq: number): unknown
+  /** The agent's pending inbox — where the host parks a freshly loaded instruction file. */
+  inbox?: { nextStep?: readonly unknown[] }
+}
+
+interface SurfaceEvent {
+  type?: string
+  data?: { source?: unknown; content?: unknown }
+}
+
+/** Every user/message event currently visible on the session surface. */
+function surfaceUserMessages(session: SessionLike): SurfaceEvent[] {
+  const out: SurfaceEvent[] = []
+  try {
+    const nodes = session.surface?.nodes
+    const eventAt = session.eventAt
+    if (!nodes || !eventAt) return out
+    for (const seq of Array.from(nodes)) {
+      const event = eventAt.call(session, seq) as SurfaceEvent | undefined
+      if (event?.type === 'user/message') out.push(event)
+    }
+  } catch {
+    return out
+  }
+  return out
+}
+
+/** Concatenated text of one message event. */
+function messageText(event: SurfaceEvent): string {
+  const content = event.data?.content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const part of content) {
+    if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
+      const text = (part as { text?: unknown }).text
+      if (typeof text === 'string') parts.push(text)
+    }
+  }
+  return parts.join('\n')
+}
+
+/* ------------------------------------------------------------------ *
+ * Instruction files the host has loaded
+ *
+ * The host publishes the facts we need in its own `agent-instructions`
+ * messages: every change carries a scope key `<dir>\u0000<file>` (the
+ * directory is relative to the project root; `user-global` and
+ * `agents-global` name the two shared instruction roots), and the
+ * baseline message carries the project root. The host loads a project's
+ * AGENTS.md mid-session once the agent touches files under it, so this
+ * set grows while the session runs — expanding the imports of every
+ * file in it is what keeps a project-scoped `@import` reachable.
+ * ------------------------------------------------------------------ */
+
+const USER_GLOBAL_SCOPE = 'user-global'
+const AGENTS_GLOBAL_SCOPE = 'agents-global'
+
+/** Root of one of the host's two shared instruction directories. */
+function userGlobalRoot(scope: string): string {
+  if (scope === USER_GLOBAL_SCOPE) {
+    return resolve(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'))
+  }
+  return resolve(process.env.DSH_AGENTS_HOME?.trim() || join(homedir(), '.agents'))
+}
+
+function collectLoadedInstructions(
+  session: SessionLike,
+  cwd: string,
+  batch: readonly unknown[] = [],
+): LoadedInstruction[] {
+  let projectRootRel = ''
+  const scopes = new Map<string, { dir: string; candidate: string }>()
+  const absorb = (source: unknown): void => {
+    if (typeof source !== 'object' || source === null) return
+    const s = source as {
+      kind?: string
+      baselineIdentity?: string
+      changes?: { scope?: string }[]
+    }
+    if (s.kind !== 'agent-instructions') return
+    if (typeof s.baselineIdentity === 'string') {
+      try {
+        const identity = JSON.parse(s.baselineIdentity) as { projectRoot?: string }
+        if (typeof identity.projectRoot === 'string') projectRootRel = identity.projectRoot
+      } catch {
+        // malformed identity: keep the previous one
+      }
+    }
+    for (const change of s.changes ?? []) {
+      const scope = change?.scope
+      if (typeof scope !== 'string') continue
+      const separator = scope.indexOf('\u0000')
+      if (separator < 0) continue
+      scopes.set(scope, {
+        dir: scope.slice(0, separator),
+        candidate: scope.slice(separator + 1),
+      })
+    }
+  }
+
+  // The host composes a newly loaded instruction file into the CURRENT step's
+  // message batch; the durable surface only catches up after that step ends.
+  // The host parks the fresh message in the agent's inbox until it splices it
+  // in, so the inbox is the earliest place the new scope is visible — read
+  // all three: inbox (just loaded), batch (this step), surface (earlier).
+  for (const message of session.inbox?.nextStep ?? []) {
+    absorb((message as { source?: unknown })?.source)
+  }
+  for (const message of batch) {
+    absorb((message as { source?: unknown })?.source)
+  }
+  for (const message of surfaceUserMessages(session)) {
+    absorb(message.data?.source)
+  }
+
+  const projectRoot = resolve(cwd, projectRootRel === '' ? '.' : projectRootRel)
+  const out: LoadedInstruction[] = []
+  const seen = new Set<string>()
+  for (const { dir, candidate } of scopes.values()) {
+    if (!candidate) continue
+    const abs =
+      dir === USER_GLOBAL_SCOPE || dir === AGENTS_GLOBAL_SCOPE
+        ? resolve(userGlobalRoot(dir), candidate)
+        : resolve(projectRoot, dir === '.' ? '' : dir, candidate)
+    const key = abs.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ abs, rel: relative(projectRoot, abs) })
+  }
+  return out
+}
+
+/* ------------------------------------------------------------------ *
+ * Rendered-block bookkeeping
+ *
+ * A previous injection is the record of what the model already saw. The
+ * surface copy of our own messages is that record, so re-deriving the
+ * same blocks and comparing them keeps a file from being injected
+ * twice — across steps, across processes, and for the incremental
+ * injections that follow a mid-session instruction load.
+ * ------------------------------------------------------------------ */
+
+const FILE_BLOCK_RE = /<file path="[^"]*">\r?\n[\s\S]*?\r?\n<\/file>/g
+const NOTE_LINE_RE = /^\[[^\]\n]+\]\s+\S.*$/gm
+
+function extractRenderedBlocks(text: string): string[] {
+  const blocks: string[] = []
+  for (const file of text.match(FILE_BLOCK_RE) ?? []) blocks.push(file)
+  // Status lines live outside the <file> elements; strip those first so a
+  // truncation note inside a block is not mistaken for a standalone line.
+  const rest = text.replace(FILE_BLOCK_RE, '\n')
+  for (const note of rest.match(NOTE_LINE_RE) ?? []) blocks.push(note.trim())
+  return blocks
+}
+
+/** Blocks this plugin already injected into the session's visible surface. */
+function injectedBlockKeys(session: SessionLike): Set<string> {
+  const keys = new Set<string>()
+  for (const message of surfaceUserMessages(session)) {
+    if (!isOursSource(message.data?.source)) continue
+    for (const block of extractRenderedBlocks(messageText(message))) keys.add(block)
+  }
+  return keys
 }
 
 /**
- * Sessions this process already injected into. Guards only the window where
- * the durable surface cannot answer yet (unreadable surface): once the
- * surface is readable it is the sole authority — a ledger entry without a
- * visible injection is stale (the block was compacted away) and MUST NOT
- * block re-seeding. Note: 0.2.0 compaction runs in place on the live agent,
- * so no `agent/created` scene fires to clear this set (verified 0.2.0-rc.1).
+ * Process-local ledger of injected blocks. Only consulted when the surface
+ * cannot answer (unreadable); the surface is authoritative otherwise, so a
+ * ledger entry whose block a compaction removed never blocks a re-seed.
  */
-const injectedSessions = new WeakSet<object>()
+const injectedLedger = new WeakMap<object, Set<string>>()
+
+function ledgerBlocks(session: SessionLike): Set<string> {
+  return injectedLedger.get(session as object) ?? new Set<string>()
+}
+
+function rememberBlocks(session: SessionLike, blocks: string[]): void {
+  const key = session as object
+  let ledger = injectedLedger.get(key)
+  if (ledger === undefined) {
+    ledger = new Set<string>()
+    injectedLedger.set(key, ledger)
+  }
+  for (const block of blocks) ledger.add(block)
+}
 
 /** True for our own message sources: 0.2.0+ kind plus the legacy 0.1.x shape. */
 function isOursSource(src: unknown): boolean {
@@ -325,6 +533,8 @@ function normalizeConfig(entry: Config): Config {
     files: strList(e.files, []),
     scanImports: typeof e.scanImports === 'boolean' ? e.scanImports : true,
     instructionFiles: strList(e.instructionFiles, ['AGENTS.md', 'CLAUDE.md']),
+    expandLoadedInstructions:
+      typeof e.expandLoadedInstructions === 'boolean' ? e.expandLoadedInstructions : true,
     maxDepth: num(e.maxDepth, 3),
     maxFileBytes: num(e.maxFileBytes, 64 * 1024),
     maxTotalBytes: num(e.maxTotalBytes, 128 * 1024),
@@ -355,37 +565,40 @@ export function apply(ctx: Context, entry: Config): void {
     // surface scan alone decides whether a re-seed is due. In-place
     // compaction (the 0.2.0 /compact path) never re-announces the agent, so
     // the pre-step gate treats a surface-absent ledger entry as stale anyway.
-    if (scene === 'compact') injectedSessions.delete(payload.agent.session)
+    if (scene === 'compact') injectedLedger.delete(payload.agent.session)
     const allowed = cfg.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
     return undefined
   })
 
-  // At most one injection per session's visible history. Three guards,
-  // cheapest first: this step's batch (in case another path already added
-  // one), the durable surface scan (the authoritative cross-process
-  // answer), and the process-local ledger (only when the surface cannot
-  // be read). A ledger entry whose injection is no longer on the surface
-  // is stale — compaction replaced the block in place — and re-seeding
-  // is due.
+  // At most one copy of each file per session, and never a file the model
+  // already has. The durable surface is the authority: it holds the blocks
+  // we injected before, so a file already in the model's context is skipped
+  // (across steps, across processes, and across the incremental injections
+  // that follow a mid-session instruction load). The process ledger only
+  // answers when the surface cannot be read.
   ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const session = agent.session as SessionLike
     const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
     if (inBatch) return decision
-    const surface = surfaceInjectionState(session)
-    if (surface === 'visible') return decision
-    if (surface === 'unknown' && injectedSessions.has(session)) return decision
 
     const scene = lastScene.get(session) ?? 'active-session'
     if (scene === 'suppressed' || !cfg.injectOn.includes(scene)) return decision
     try {
       signal.throwIfAborted()
       const cwd = session.header?.cwd ?? process.cwd()
-      const bundle = await collectBundle(cfg, cwd)
+      const surface = surfaceInjectionState(session)
+      const already = surface === 'unknown' ? ledgerBlocks(session) : injectedBlockKeys(session)
+      // Wrapper language follows the browser-resolved locale synced into our
+      // own config by the client half; final fallback English.
       const wrapper = wrapperFor(cfg.detectedLocale || undefined)
-      const text = renderBundle(cfg, bundle, wrapper)
+      const loaded = cfg.expandLoadedInstructions
+        ? collectLoadedInstructions(session, cwd, decision.messages)
+        : []
+      const bundle = await collectBundle(cfg, cwd, loaded, already, wrapper)
+      const text = renderBundle(cfg, bundle)
       if (text === undefined) return decision
       const message = createUserMessage({
         content: [{ type: 'text', text }],
@@ -397,9 +610,9 @@ export function apply(ctx: Context, entry: Config): void {
       // catalog, …) join AFTER our inner pass, so only the tail is
       // guaranteed to sit behind all of them. The model reads our expanded
       // files last, right after the instructions that reference them.
-      injectedSessions.add(session)
+      rememberBlocks(session, bundle.blocks)
       ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (scene=%s)',
-        bundle.sections.length, bundle.missing.length, bundle.omitted.length, scene)
+        bundle.fileCount, bundle.missingCount, bundle.omittedCount, scene)
       return {
         ...decision,
         messages: [...decision.messages, message],
