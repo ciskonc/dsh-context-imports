@@ -9,7 +9,7 @@
  *  - 页面注册 = configForms.whileServed([NS], () => slots.inject('plugins.item', ...))
  *    （Host 不为该 loader entry 服务时页面自动消失）
  */
-import { ContextImportsCard, SOURCES } from './ContextImportsCard.tsx'
+import { ContextImportsCard, LIVE_MODES, SOURCES } from './ContextImportsCard.tsx'
 import type { ContextImportsCardState, Translate } from './ContextImportsCard.tsx'
 import { boolField, linesField, tokensField } from './form.ts'
 import type { FieldSpec } from './form.ts'
@@ -74,6 +74,9 @@ class ContextImportsCardController {
       linesField('files'),
       boolField('scanImports'),
       boolField('expandLoadedInstructions'),
+      tokensField('liveMode', LIVE_MODES),
+      settingsNumberField('watchDebounceMs') as unknown as FieldSpec,
+      settingsNumberField('minReinjectIntervalMs') as unknown as FieldSpec,
       linesField('instructionFiles'),
       settingsNumberField('maxDepth') as unknown as FieldSpec,
       settingsNumberField('maxFileBytes') as unknown as FieldSpec,
@@ -91,6 +94,9 @@ class ContextImportsCardController {
       files: this.form.field('files'),
       scanImports: this.form.field('scanImports'),
       expandLoadedInstructions: this.form.field('expandLoadedInstructions'),
+      liveMode: this.form.field('liveMode'),
+      watchDebounceMs: this.form.field('watchDebounceMs'),
+      minReinjectIntervalMs: this.form.field('minReinjectIntervalMs'),
       instructionFiles: this.form.field('instructionFiles'),
       maxDepth: this.form.field('maxDepth'),
       maxFileBytes: this.form.field('maxFileBytes'),

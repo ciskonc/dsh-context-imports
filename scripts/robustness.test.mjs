@@ -402,9 +402,17 @@ await check('an unreadable surface does not crash the step', async () => {
 
 console.log('\nscene gating')
 
-await check('a scene outside injectOn injects nothing', async () => {
+await check('an unknown scene is treated as startup and injects', async () => {
+  // No agent/created record reachable -> the gate treats it as a fresh seed.
   const session = makeSession(root, [])
   const { injected } = await runPlugin({ entry: defaultEntry, session, scene: 'unknown-scene' })
+  assert.equal(injected.length, 1)
+})
+
+await check('a scene suppressed by injectOn injects nothing', async () => {
+  const session = makeSession(root, [])
+  const entry = { ...defaultEntry, injectOn: ['resume', 'clear', 'compact'] }
+  const { injected } = await runPlugin({ entry, session, scene: 'startup' })
   assert.equal(injected.length, 0)
 })
 

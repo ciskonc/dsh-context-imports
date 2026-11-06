@@ -87,27 +87,24 @@ export interface Config {
 }
 
 export const Config = z.object({
-  // Volatile-vs-explicit-value trade-off (verified on 0.2.1-rc.5 schemastery):
-  // a `.volatile()` field loses BOTH its schema default AND any explicit
-  // patch value (the projection returns an empty object for it). Exactly ONE
-  // field stays volatile - `settingsMount`, a valueless anchor whose only job
-  // is to make the settings describe projection non-empty so the settings
-  // page mounts (see iron rule 3). Every real field is non-volatile so patch
-  // values and schema defaults both survive.
-  files: z.array(z.string()).default([]),
-  scanImports: z.boolean().default(true),
-  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']),
-  expandLoadedInstructions: z.boolean().default(true),
-  maxDepth: z.number().default(3),
-  maxFileBytes: z.number().default(64 * 1024),
-  maxTotalBytes: z.number().default(128 * 1024),
-  injectOn: z.array(z.string()).default([...SOURCES]),
-  liveMode: z.string().default('off'),
-  watchDebounceMs: z.number().default(30_000),
-  minReinjectIntervalMs: z.number().default(300_000),
-  template: z.string().default(''),
-  detectedLocale: z.string().default(''),
-  settingsMount: z.boolean().default(false).volatile(),
+  // Every field is `.volatile()` (settings-page mount, iron rule 3).
+  // Volatile fields arrive from cordis as a LIVE REFERENCE object
+  // ({ get(), write() } protocol from cosmokit) - normalizeConfig unwraps
+  // each field with .get() before use, so patch values, schema defaults and
+  // live runtime updates all flow through (verified 0.2.1-rc.5/0.2.2-rc.1).
+  files: z.array(z.string()).default([]).volatile(),
+  scanImports: z.boolean().default(true).volatile(),
+  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']).volatile(),
+  expandLoadedInstructions: z.boolean().default(true).volatile(),
+  maxDepth: z.number().default(3).volatile(),
+  maxFileBytes: z.number().default(64 * 1024).volatile(),
+  maxTotalBytes: z.number().default(128 * 1024).volatile(),
+  injectOn: z.array(z.string()).default([...SOURCES]).volatile(),
+  liveMode: z.string().default('off').volatile(),
+  watchDebounceMs: z.number().default(30_000).volatile(),
+  minReinjectIntervalMs: z.number().default(300_000).volatile(),
+  template: z.string().default('').volatile(),
+  detectedLocale: z.string().default('').volatile(),
 })
 
 /* ------------------------------------------------------------------ *
@@ -555,32 +552,42 @@ function surfaceInjectionState(session: SessionLike): 'visible' | 'absent' | 'un
  * field to its declared type with the schema default as fallback.
  */
 function normalizeConfig(entry: Config): Config {
+  // Volatile fields arrive as { get(), write() } live references (cosmokit
+  // protocol). Unwrap before use; plain values pass straight through.
+  const unwrap = (v: unknown): unknown =>
+    v !== null && typeof v === 'object' && typeof (v as { get?: unknown }).get === 'function'
+      ? (v as { get: () => unknown }).get()
+      : v
   const e = entry as Partial<Config>
   const strList = (v: unknown, fallback: string[]): string[] => {
-    if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string')
-    if (typeof v === 'string') return v.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
+    const raw = unwrap(v)
+    if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string')
+    if (typeof raw === 'string') return raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean)
     return fallback
   }
-  const num = (v: unknown, fallback: number): number =>
-    typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback
+  const bool = (v: unknown, fallback: boolean): boolean =>
+    typeof unwrap(v) === 'boolean' ? (unwrap(v) as boolean) : fallback
+  const num = (v: unknown, fallback: number): number => {
+    const n = unwrap(v)
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : fallback
+  }
   return {
     files: strList(e.files, []),
-    scanImports: typeof e.scanImports === 'boolean' ? e.scanImports : true,
+    scanImports: bool(e.scanImports, true),
     instructionFiles: strList(e.instructionFiles, ['AGENTS.md', 'CLAUDE.md']),
-    expandLoadedInstructions:
-      typeof e.expandLoadedInstructions === 'boolean' ? e.expandLoadedInstructions : true,
+    expandLoadedInstructions: bool(e.expandLoadedInstructions, true),
     maxDepth: num(e.maxDepth, 3),
     maxFileBytes: num(e.maxFileBytes, 64 * 1024),
     maxTotalBytes: num(e.maxTotalBytes, 128 * 1024),
     injectOn: strList(e.injectOn, [...SOURCES]).filter((s) => (SOURCES as readonly string[]).includes(s)),
-    liveMode:
-      e.liveMode === 'inject' || e.liveMode === 'inject+wake' || e.liveMode === 'off'
-        ? e.liveMode
-        : 'off',
+    liveMode: (() => {
+      const v = unwrap(e.liveMode)
+      return v === 'inject' || v === 'inject+wake' || v === 'off' ? v : 'off'
+    })(),
     watchDebounceMs: num(e.watchDebounceMs, 30_000),
     minReinjectIntervalMs: num(e.minReinjectIntervalMs, 300_000),
-    template: typeof e.template === 'string' ? e.template : '',
-    detectedLocale: typeof e.detectedLocale === 'string' ? e.detectedLocale : '',
+    template: typeof unwrap(e.template) === 'string' ? (unwrap(e.template) as string) : '',
+    detectedLocale: typeof unwrap(e.detectedLocale) === 'string' ? (unwrap(e.detectedLocale) as string) : '',
   }
 }
 
@@ -748,7 +755,10 @@ export function apply(ctx: Context, entry: Config): void {
     const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
     if (inBatch) return decision
 
-    const scene = lastScene.get(session) ?? 'active-session'
+    // No recorded scene (fiber reloaded after a hot swap, or the agent was
+    // created before this plugin activated): treat as startup so long-lived
+    // sessions still get seeded — the surface dedup below keeps it to one copy.
+    const scene = lastScene.get(session) ?? 'startup'
     if (scene === 'suppressed' || !cfg.injectOn.includes(scene)) return decision
     try {
       signal.throwIfAborted()

@@ -37,6 +37,9 @@ export interface ContextImportsCardState {
   files: FieldState
   scanImports: FieldState
   expandLoadedInstructions: FieldState
+  liveMode: FieldState
+  watchDebounceMs: FieldState
+  minReinjectIntervalMs: FieldState
   instructionFiles: FieldState
   maxDepth: FieldState
   maxFileBytes: FieldState
@@ -47,6 +50,9 @@ export interface ContextImportsCardState {
 
 /** 合法的注入时机 token（与 host 端 SOURCES 一致）。 */
 export const SOURCES = ['startup', 'resume', 'clear', 'compact'] as const
+
+/** liveMode 的合法取值（与 host 端一致）。 */
+export const LIVE_MODES = ['off', 'inject', 'inject+wake'] as const
 
 /** SettingsForm 框架的文案（从本页字典读）。 */
 function formLabels(t: Translate) {
@@ -146,6 +152,44 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
         state={state.scanImports}
         disabled={!state.writable}
         onEdit={(text) => props.edit('scanImports', text)}
+      />
+      <BoolField
+        id="plugin-config-context-imports-expand-loaded"
+        label={t('expandLoadedInstructions')}
+        hint={t('expandLoadedInstructionsHint')}
+        state={state.expandLoadedInstructions}
+        disabled={!state.writable}
+        onEdit={(text) => props.edit('expandLoadedInstructions', text)}
+      />
+      <TokensField
+        id="plugin-config-context-imports-live-mode"
+        label={t('liveMode')}
+        hint={t('liveModeHint')}
+        state={state.liveMode}
+        disabled={!state.writable}
+        tokens={LIVE_MODES}
+        tokenLabel={(token) => t(`liveMode_${token.replace('+', '_')}`)}
+        onEdit={(text) => props.edit('liveMode', text)}
+      />
+      <SettingsValueField
+        numeric
+        {...fieldProps(
+          'watchDebounceMs',
+          'plugin-config-context-imports-watch-debounce',
+          t('watchDebounceMs'),
+          t('watchDebounceMsHint'),
+          t('invalidNumber'),
+        )}
+      />
+      <SettingsValueField
+        numeric
+        {...fieldProps(
+          'minReinjectIntervalMs',
+          'plugin-config-context-imports-min-reinject',
+          t('minReinjectIntervalMs'),
+          t('minReinjectIntervalMsHint'),
+          t('invalidNumber'),
+        )}
       />
       <BoolField
         id="plugin-config-context-imports-expand-loaded"
