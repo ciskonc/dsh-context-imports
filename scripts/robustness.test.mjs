@@ -90,11 +90,23 @@ function makeSession(cwd, surfaceMessages) {
   }
 }
 
-async function runPlugin({ entry, session, scene = 'startup', inbox = [] }) {
+/** Watch-event callbacks registered by the plugin, keyed by session object. */
+const watchFile = (abs) => {
+  // A real content change is the most faithful trigger: it goes through the
+  // actual fs.watch registration, the debounce and the throttle.
+  writeFileSync(abs, `# changed at ${Date.now()}\n`, 'utf8')
+}
+
+async function runPlugin({ entry, session, scene = 'startup', inbox = [], captureFollowup }) {
   const injected = []
   const listeners = new Map()
+  const disposers = []
   const ctx = {
     logger: { info() {}, warn() {} },
+    effect(factory) {
+      const dispose = factory()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
     on(event, handler) {
       listeners.set(event, handler)
     },
@@ -106,12 +118,15 @@ async function runPlugin({ entry, session, scene = 'startup', inbox = [] }) {
   }
   const preStep = listeners.get('agent/pre-step')
   const decision = { kind: 'continue', messages: [] }
+  const agent = {
+    session,
+    id: 'agent-1',
+    inbox: { nextStep: inbox },
+    followup: captureFollowup ? (message) => captureFollowup(message) : undefined,
+  }
   const result = preStep
     ? await preStep(
-        {
-          agent: { session, id: 'agent-1', inbox: { nextStep: inbox } },
-          signal: new AbortController().signal,
-        },
+        { agent, signal: new AbortController().signal },
         async () => decision,
       )
     : decision
@@ -397,6 +412,159 @@ await check('a scene inside injectOn injects', async () => {
   const session = makeSession(root, [])
   const { injected } = await runPlugin({ entry: defaultEntry, session, scene: 'resume' })
   assert.equal(injected.length, 1)
+})
+
+/* ------------------------------------------------------------------ *
+ * 5. Live mode (file watching)
+ * ------------------------------------------------------------------ */
+
+console.log('\nlive mode')
+
+// The injected file lives in the shared `root` workspace fixture; every live
+// test writes a real change to it and waits out the debounce window.
+const liveEntry = (over = {}) => ({
+  ...defaultEntry,
+  liveMode: 'inject+wake',
+  watchDebounceMs: 50,
+  minReinjectIntervalMs: 1000,
+  ...over,
+})
+const waitOut = async () => new Promise((resolve) => setTimeout(resolve, 400))
+
+await check('liveMode=off keeps 0.3.1 behaviour: injection but no wake', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  const { injected } = await runPlugin({
+    entry: { ...defaultEntry, liveMode: 'off' },
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  assert.equal(injected.length, 1)
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 0, 'off mode never wakes')
+})
+
+await check('liveMode=inject: file change does NOT wake', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ liveMode: 'inject' }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 0, 'inject mode never wakes')
+})
+
+await check('liveMode=inject+wake: a real file change wakes the agent once', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 50 }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  assert.equal(followups.length, 0, 'no wake at injection time')
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 1, 'followup called once for the changed file')
+  const wake = followups[0]
+  assert.equal(wake?.source?.kind, 'context-imports-wake')
+  assert.notEqual(wake?.source?.kind, 'context-imports')
+})
+
+await check('churn throttle: bursts inside the window wake once', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 2000 }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  // Let the injection-time throttle stamp age past the window, then wake.
+  await new Promise((resolve) => setTimeout(resolve, 2100))
+  watchFile(join(root, 'imports', 'extra.md'))
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  assert.equal(followups.length, 1, 'first change wakes')
+  // A tight burst of three writes with no sleep between them: the debounce
+  // collapses them into one evaluation, and that evaluation is still inside
+  // the 2000ms min-interval counted from the wake — throttled.
+  for (let round = 0; round < 3; round++) watchFile(join(root, 'imports', 'extra.md'))
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  assert.equal(followups.length, 1, 'tight burst inside the min interval is throttled')
+  // After the window expires, the next change wakes again.
+  await new Promise((resolve) => setTimeout(resolve, 2100))
+  watchFile(join(root, 'imports', 'extra.md'))
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  assert.equal(followups.length, 2, 'change after the window expires wakes again')
+})
+
+await check('a session that never injected the file is not woken', async () => {
+  const strangerSession = makeSession(root, [])
+  const strangerFollowups = []
+  const listenerSession = makeSession(root, [])
+  const listenerFollowups = []
+  // The listener session injects and starts watching.
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 50 }),
+    session: listenerSession,
+    captureFollowup: (message) => listenerFollowups.push(message),
+  })
+  // A stranger agent on a DIFFERENT session only registers as a wake target
+  // (same plugin fiber), but has no injected files.
+  const listeners = new Map()
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    effect(factory) {
+      const dispose = factory()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
+    on(event, handler) {
+      listeners.set(event, handler)
+    },
+  }
+  apply(ctx, liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 50 }))
+  listeners.get('agent/created')({ source: 'startup', agent: { session: strangerSession, id: 'a2' } })
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(strangerFollowups.length, 0, 'stranger session not woken')
+  assert.ok(listenerFollowups.length >= 1, 'listener session woken')
+})
+
+await check('agent/disposed stops the wake', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  const listeners = new Map()
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    effect(factory) {
+      const dispose = factory()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
+    on(event, handler) {
+      listeners.set(event, handler)
+    },
+  }
+  apply(ctx, liveEntry())
+  listeners.get('agent/created')({ source: 'startup', agent: { session, id: 'a1' } })
+  listeners.get('agent/pre-step') &&
+    (await listeners.get('agent/pre-step')(
+      {
+        agent: { session, id: 'a1', followup: (message) => followups.push(message) },
+        signal: new AbortController().signal,
+      },
+      async () => ({ kind: 'continue', messages: [] }),
+    ))
+  listeners.get('agent/disposed')({ agent: { session, id: 'a1' } })
+  // Fiber unload also closes the watchers.
+  for (const dispose of disposers) dispose()
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 0, 'disposed agent is not woken')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

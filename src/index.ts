@@ -11,6 +11,7 @@
  * kind, schemastery Config. Configuration rides the loader patch — no
  * settings registration needed.
  */
+import { appendFileSync, watch as fsWatchSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -27,9 +28,21 @@ export interface ContextImportsSource {
   form: 'instructions'
 }
 
+/**
+ * Source for the wake turn of live mode (`inject+wake`). Deliberately NOT
+ * `context-imports`: the pre-step `inBatch` guard skips a step whose batch
+ * already carries one of our injection messages, and the whole point of the
+ * wake turn is for the NEXT gate evaluation to inject the changed files.
+ */
+export interface ContextImportsWakeSource {
+  kind: 'context-imports-wake'
+  form: 'wake'
+}
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'context-imports': ContextImportsSource
+    'context-imports-wake': ContextImportsWakeSource
   }
 }
 
@@ -57,6 +70,16 @@ export interface Config {
   maxTotalBytes: number
   /** Session-start sources that trigger injection. */
   injectOn: string[]
+  /**
+   * Live mode for watched files. `off` (default) behaves exactly like 0.3.1;
+   * `inject` re-injects changed files on the next interaction; `inject+wake`
+   * additionally wakes an idle agent right away via `agent.followup`.
+   */
+  liveMode: 'off' | 'inject' | 'inject+wake'
+  /** Debounce window for file-change events (editors often fire twice). */
+  watchDebounceMs: number
+  /** Minimum interval between re-injections of the same file (churn throttle). */
+  minReinjectIntervalMs: number
   /** Custom wrapper template with {{content}} placeholder; empty = locale default. */
   template: string
   /** Auto-written by the client half: the browser-resolved UI language. Lets the host follow the UI locale when the user has no explicit locale preference. */
@@ -64,19 +87,27 @@ export interface Config {
 }
 
 export const Config = z.object({
-  // Every field is `.volatile()`: the settings describe projection only
-  // serves namespaces whose schema has at least one volatile field, and
-  // without one the plugin's settings page never mounts (verified 0.2.0-rc.1).
-  files: z.array(z.string()).default([]).volatile(),
-  scanImports: z.boolean().default(true).volatile(),
-  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']).volatile(),
-  expandLoadedInstructions: z.boolean().default(true).volatile(),
-  maxDepth: z.number().default(3).volatile(),
-  maxFileBytes: z.number().default(64 * 1024).volatile(),
-  maxTotalBytes: z.number().default(128 * 1024).volatile(),
-  injectOn: z.array(z.string()).default([...SOURCES]).volatile(),
-  template: z.string().default('').volatile(),
-  detectedLocale: z.string().default('').volatile(),
+  // Volatile-vs-explicit-value trade-off (verified on 0.2.1-rc.5 schemastery):
+  // a `.volatile()` field loses BOTH its schema default AND any explicit
+  // patch value (the projection returns an empty object for it). Exactly ONE
+  // field stays volatile - `settingsMount`, a valueless anchor whose only job
+  // is to make the settings describe projection non-empty so the settings
+  // page mounts (see iron rule 3). Every real field is non-volatile so patch
+  // values and schema defaults both survive.
+  files: z.array(z.string()).default([]),
+  scanImports: z.boolean().default(true),
+  instructionFiles: z.array(z.string()).default(['AGENTS.md', 'CLAUDE.md']),
+  expandLoadedInstructions: z.boolean().default(true),
+  maxDepth: z.number().default(3),
+  maxFileBytes: z.number().default(64 * 1024),
+  maxTotalBytes: z.number().default(128 * 1024),
+  injectOn: z.array(z.string()).default([...SOURCES]),
+  liveMode: z.string().default('off'),
+  watchDebounceMs: z.number().default(30_000),
+  minReinjectIntervalMs: z.number().default(300_000),
+  template: z.string().default(''),
+  detectedLocale: z.string().default(''),
+  settingsMount: z.boolean().default(false).volatile(),
 })
 
 /* ------------------------------------------------------------------ *
@@ -168,6 +199,8 @@ interface LoadedInstruction {
 interface Bundle {
   /** Rendered blocks, ready to be wrapped. */
   blocks: string[]
+  /** Absolute paths of the files actually injected this round (watch list source). */
+  filePaths: string[]
   fileCount: number
   missingCount: number
   omittedCount: number
@@ -183,6 +216,7 @@ async function collectBundle(
   const seen = new Set<string>()
   const queue: QueueItem[] = []
   const blocks: string[] = []
+  const filePaths: string[] = []
   let fileCount = 0
   let missingCount = 0
   let omittedCount = 0
@@ -259,10 +293,11 @@ async function collectBundle(
     }
     total += raw.byteLength
     blocks.push(block)
+    filePaths.push(item.abs)
     fileCount++
   }
 
-  return { blocks, fileCount, missingCount, omittedCount }
+  return { blocks, filePaths, fileCount, missingCount, omittedCount }
 }
 
 /* ------------------------------------------------------------------ *
@@ -538,6 +573,12 @@ function normalizeConfig(entry: Config): Config {
     maxFileBytes: num(e.maxFileBytes, 64 * 1024),
     maxTotalBytes: num(e.maxTotalBytes, 128 * 1024),
     injectOn: strList(e.injectOn, [...SOURCES]).filter((s) => (SOURCES as readonly string[]).includes(s)),
+    liveMode:
+      e.liveMode === 'inject' || e.liveMode === 'inject+wake' || e.liveMode === 'off'
+        ? e.liveMode
+        : 'off',
+    watchDebounceMs: num(e.watchDebounceMs, 30_000),
+    minReinjectIntervalMs: num(e.minReinjectIntervalMs, 300_000),
     template: typeof e.template === 'string' ? e.template : '',
     detectedLocale: typeof e.detectedLocale === 'string' ? e.detectedLocale : '',
   }
@@ -548,6 +589,9 @@ export function apply(ctx: Context, entry: Config): void {
   // value — user edits ride the profile patch, which reloads this fiber with
   // the updated config. No installSection, no settings thunk.
   const cfg = normalizeConfig(entry)
+  try {
+    appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} apply cfg.liveMode=${cfg.liveMode} raw=${JSON.stringify((entry as Partial<Config>).liveMode)}\n`)
+  } catch { /* debug only */ }
 
   // Which creation scene fired last, per session. `agent/pre-step` has no
   // scene concept, so the `agent/created` listener records it and the
@@ -556,6 +600,124 @@ export function apply(ctx: Context, entry: Config): void {
   // this process — model switches, sessions created before the plugin
   // activated) default to ALLOWED: they get seeded exactly once.
   const lastScene = new WeakMap<object, string>()
+
+  // --- Live mode state (all strong references cleaned on dispose) ---
+  /** session → absolute paths injected into it (lower-cased keys). */
+  const sessionFiles = new WeakMap<object, Set<string>>()
+  /** absolute path (lower-cased) → last re-injection time. */
+  const lastInjectAt = new Map<string, number>()
+  /** absolute path (lower-cased) → fs watcher. */
+  const watchers = new Map<string, import('node:fs').FSWatcher>()
+  /** live agents that may be woken on a watched-file change. */
+  const wakeTargets = new Set<{ agent: { session: object; followup?: (message: unknown) => void }; session: object }>()
+  /** absolute path (lower-cased) → sessions that have it injected. */
+  const watchersByPath = new Map<string, Set<object>>()
+
+  const stopWatchIfUnused = (key: string): void => {
+    const sessions = watchersByPath.get(key)
+    if (sessions === undefined || sessions.size === 0) {
+      watchers.get(key)?.close()
+      watchers.delete(key)
+      watchersByPath.delete(key)
+    }
+  }
+
+  const ensureWatch = (session: object, abs: string): void => {
+    const key = abs.toLowerCase()
+    try {
+      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} ensureWatch ${key}\n`)
+    } catch { /* debug only */ }
+    let sessions = watchersByPath.get(key)
+    if (sessions === undefined) {
+      sessions = new Set()
+      watchersByPath.set(key, sessions)
+    }
+    sessions.add(session)
+    if (watchers.has(key)) return
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let watcher: import('node:fs').FSWatcher
+    try {
+      watcher = fsWatchSync(abs, { persistent: false }, () => {
+        // Debounce: editors on Windows often fire two events per save.
+        if (timer !== undefined) return
+        timer = setTimeout(() => {
+          timer = undefined
+          onMaybeChanged(abs)
+        }, cfg.watchDebounceMs)
+        timer.unref?.()
+      })
+    } catch {
+      // File vanished between listing and watching: not fatal, the next
+      // injection round re-reports it as missing.
+      return
+    }
+    watcher.on('error', () => {
+      /* watched file deleted/renamed: keep or drop silently */
+    })
+    watchers.set(key, watcher)
+  }
+
+  const onMaybeChanged = (abs: string): void => {
+    try {
+      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} onMaybeChanged ${abs}\n`)
+    } catch { /* debug only */ }
+    if (cfg.liveMode === 'off') return
+    const key = abs.toLowerCase()
+    const now = Date.now()
+    if (now - (lastInjectAt.get(key) ?? 0) < cfg.minReinjectIntervalMs) {
+      try {
+        appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} throttled ${key}\n`)
+      } catch { /* debug only */ }
+      return
+    }
+    lastInjectAt.set(key, now)
+    try {
+      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} targets=${wakeTargets.size}\n`)
+    } catch { /* debug only */ }
+    for (const target of wakeTargets) {
+      if (!sessionFiles.get(target.session)?.has(key)) continue
+      if (cfg.liveMode === 'inject+wake') {
+        // Wake turn: `followup(message)` queues an ordinary turn and wakes the
+        // idle driver. The wake message uses its OWN source kind (not
+        // `context-imports`) so the pre-step inBatch guard does not mistake
+        // the wake turn for an already-injected step. The changed file is
+        // injected by the regular gate inside that turn.
+        try {
+          target.agent.followup?.(
+            createUserMessage({
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    `[dsh-context-imports] live update: an instruction-referenced file changed on disk ` +
+                    `(${abs}). Its latest content is injected in this turn; treat the disk version as current.`,
+                },
+              ],
+              source: { kind: 'context-imports-wake', form: 'wake' },
+            }),
+          )
+          try {
+            appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} followup called\n`)
+          } catch { /* debug only */ }
+        } catch (error) {
+          ctx.logger.warn('dsh-context-imports: wake failed: %o', error)
+        }
+      }
+      // 'inject' mode: no wake — the regular gate picks the change up on the
+      // next interaction.
+    }
+  }
+
+  // Watcher lifecycle: closed when this fiber unloads (patch edit, plugin
+  // disable, host shutdown).
+  ctx.effect(() => {
+    return () => {
+      for (const watcher of watchers.values()) watcher.close()
+      watchers.clear()
+      watchersByPath.clear()
+      wakeTargets.clear()
+    }
+  }, 'dsh-context-imports: live watchers')
 
   ctx.on('agent/created', (payload): undefined => {
     const scene = SOURCES.includes(payload.source as (typeof SOURCES)[number]) ? payload.source : undefined
@@ -567,6 +729,26 @@ export function apply(ctx: Context, entry: Config): void {
     if (scene === 'compact') injectedLedger.delete(payload.agent.session)
     const allowed = cfg.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
+    if (cfg.liveMode !== 'off' && allowed) {
+      wakeTargets.add({
+        agent: payload.agent as unknown as { session: object; followup?: (message: unknown) => void },
+        session: payload.agent.session as object,
+      })
+    }
+    return undefined
+  })
+
+  ctx.on('agent/disposed', (payload): undefined => {
+    const session = (payload as { agent?: { session?: object }; session?: object }).agent?.session ?? (payload as { session?: object }).session
+    if (session === undefined) return undefined
+    wakeTargets.forEach((target) => {
+      if (target.session === session) wakeTargets.delete(target)
+    })
+    const injectedPaths = sessionFiles.get(session)
+    if (injectedPaths !== undefined) {
+      for (const key of injectedPaths) stopWatchIfUnused(key)
+      sessionFiles.delete(session)
+    }
     return undefined
   })
 
@@ -611,6 +793,25 @@ export function apply(ctx: Context, entry: Config): void {
       // guaranteed to sit behind all of them. The model reads our expanded
       // files last, right after the instructions that reference them.
       rememberBlocks(session, bundle.blocks)
+      if (cfg.liveMode !== 'off') {
+        try {
+          appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} live-branch agentFollowup=${Boolean((agent as { followup?: unknown }).followup)} filePaths=${bundle.filePaths.length}
+`)
+        } catch { /* debug only */ }
+        const set = sessionFiles.get(session) ?? new Set<string>()
+        for (const abs of bundle.filePaths) {
+          set.add(abs.toLowerCase())
+          ensureWatch(session as object, abs)
+          lastInjectAt.set(abs.toLowerCase(), Date.now())
+        }
+        sessionFiles.set(session, set)
+        if (cfg.liveMode === 'inject+wake') {
+          wakeTargets.add({
+            agent: agent as unknown as { session: object; followup?: (message: unknown) => void },
+            session: session as object,
+          })
+        }
+      }
       ctx.logger.info('dsh-context-imports: injected %d file(s), %d missing, %d omitted (scene=%s)',
         bundle.fileCount, bundle.missingCount, bundle.omittedCount, scene)
       return {
