@@ -589,9 +589,6 @@ export function apply(ctx: Context, entry: Config): void {
   // value — user edits ride the profile patch, which reloads this fiber with
   // the updated config. No installSection, no settings thunk.
   const cfg = normalizeConfig(entry)
-  try {
-    appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} apply cfg.liveMode=${cfg.liveMode} raw=${JSON.stringify((entry as Partial<Config>).liveMode)}\n`)
-  } catch { /* debug only */ }
 
   // Which creation scene fired last, per session. `agent/pre-step` has no
   // scene concept, so the `agent/created` listener records it and the
@@ -624,9 +621,6 @@ export function apply(ctx: Context, entry: Config): void {
 
   const ensureWatch = (session: object, abs: string): void => {
     const key = abs.toLowerCase()
-    try {
-      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} ensureWatch ${key}\n`)
-    } catch { /* debug only */ }
     let sessions = watchersByPath.get(key)
     if (sessions === undefined) {
       sessions = new Set()
@@ -658,22 +652,13 @@ export function apply(ctx: Context, entry: Config): void {
   }
 
   const onMaybeChanged = (abs: string): void => {
-    try {
-      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} onMaybeChanged ${abs}\n`)
-    } catch { /* debug only */ }
     if (cfg.liveMode === 'off') return
     const key = abs.toLowerCase()
     const now = Date.now()
     if (now - (lastInjectAt.get(key) ?? 0) < cfg.minReinjectIntervalMs) {
-      try {
-        appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} throttled ${key}\n`)
-      } catch { /* debug only */ }
       return
     }
     lastInjectAt.set(key, now)
-    try {
-      appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} targets=${wakeTargets.size}\n`)
-    } catch { /* debug only */ }
     for (const target of wakeTargets) {
       if (!sessionFiles.get(target.session)?.has(key)) continue
       if (cfg.liveMode === 'inject+wake') {
@@ -696,9 +681,6 @@ export function apply(ctx: Context, entry: Config): void {
               source: { kind: 'context-imports-wake', form: 'wake' },
             }),
           )
-          try {
-            appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} followup called\n`)
-          } catch { /* debug only */ }
         } catch (error) {
           ctx.logger.warn('dsh-context-imports: wake failed: %o', error)
         }
@@ -794,10 +776,6 @@ export function apply(ctx: Context, entry: Config): void {
       // files last, right after the instructions that reference them.
       rememberBlocks(session, bundle.blocks)
       if (cfg.liveMode !== 'off') {
-        try {
-          appendFileSync('C:/Users/Gamer/Desktop/agent/01_PROJECTS/dsh-context-imports/dev/home/dbg-live.log', `${new Date().toISOString()} live-branch agentFollowup=${Boolean((agent as { followup?: unknown }).followup)} filePaths=${bundle.filePaths.length}
-`)
-        } catch { /* debug only */ }
         const set = sessionFiles.get(session) ?? new Set<string>()
         for (const abs of bundle.filePaths) {
           set.add(abs.toLowerCase())
