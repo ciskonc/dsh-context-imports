@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-imports",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
   "keywords": [
     "dsh-plugin",
