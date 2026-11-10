@@ -72,7 +72,7 @@ The injected message is a `<system-reminder>` containing `<file path="...">` blo
 | `maxFileBytes` | `65536` | Per-file cap in bytes; larger files are truncated |
 | `maxTotalBytes` | `131072` | Total budget; files beyond it are skipped with a note |
 | `injectOn` | all four | Which session-start scenes trigger injection |
-| `liveMode` | `off` | Live mode for changed files: `off` (same as 0.3.1) / `inject` (re-inject on next interaction) / `inject+wake` (wake an idle agent right away) |
+| `liveMode` | `off` | Optional live mode (default off). Set in the settings page: `off` = same as 0.3.1, `inject` = re-inject changed files on next interaction, `inject+wake` = wake an idle agent right away |
 | `watchDebounceMs` | `30000` | Debounce window for file-change events |
 | `minReinjectIntervalMs` | `300000` | Minimum interval between re-injections of the same file (churn throttle) |
 | `template` | `""` | Custom wrapper text. `{{content}}` marks where the files go; empty uses the plain wrapper |

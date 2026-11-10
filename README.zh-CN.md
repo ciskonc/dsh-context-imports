@@ -70,7 +70,7 @@ agent/pre-step（每一步）决定是否注入
 | `maxFileBytes` | `65536` | 单文件字节上限，超出截断 |
 | `maxTotalBytes` | `131072` | 总字节预算，放不下的文件跳过并标注 |
 | `injectOn` | 全部四项 | 哪些会话启动场景触发注入 |
-| `liveMode` | `off` | 文件变更的实时模式：`off`（同 0.3.1）/ `inject`（变更后下次交互补发）/ `inject+wake`（空闲会话立即唤醒重注入） |
+| `liveMode` | `off` | 可选的实时模式（默认关闭）。在设置页选择：`off` = 同 0.3.1，`inject` = 变更后下次交互补发，`inject+wake` = 空闲会话立即唤醒重注入 |
 | `watchDebounceMs` | `30000` | 文件变更事件的防抖窗口 |
 | `minReinjectIntervalMs` | `300000` | 同一文件两次重注入的最小间隔（防频繁改写刷屏） |
 | `template` | `""` | 自定义包装文本。`{{content}}` 标记文件内容的位置；留空用默认格式 |
