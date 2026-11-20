@@ -59,3 +59,15 @@ export function tokensField(field: string, allowed: readonly string[]): FieldSpe
     },
   }
 }
+
+/** 单值枚举字段（liveMode：'off' | 'inject' | 'inject+wake'）：format/parse 都走字符串。 */
+export function enumField(field: string, allowed: readonly string[]): FieldSpec {
+  return {
+    field,
+    format: (value) => (typeof value === 'string' && allowed.includes(value) ? value : ''),
+    parse: (text) => {
+      if (text.trim() === '') return { kind: 'clear' }
+      return allowed.includes(text) ? { kind: 'set', value: text } : undefined
+    },
+  }
+}

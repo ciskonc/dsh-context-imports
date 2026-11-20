@@ -13,7 +13,7 @@ export type Translate = (key: string) => string
 /** controller.inject() 经 slot 运行时注入的 props（hooks.xxx → useXxx）。 */
 export interface ContextImportsCardProps {
   t: Translate
-  view?: 'summary' | 'form'
+  view?: 'summary' | 'page' | 'form'
   useContextImportsCard: <S>(selector: (snapshot: ContextImportsCardState) => S) => S
   edit: (field: string, text: string) => void
   resetField: (field: string) => void
@@ -62,6 +62,8 @@ function formLabels(t: Translate) {
     saveFailed: t('saveFailed'),
     save: t('save'),
     saving: t('saving'),
+    discard: t('discard'),
+    unsaved: t('unsaved'),
   }
 }
 
@@ -124,6 +126,39 @@ function TokensField(props: {
   )
 }
 
+
+/** liveMode：单值枚举的 Checkbox 组（单选），草稿即枚举字符串本身。 */
+function RadioField(props: {
+  id: string
+  label: string
+  hint: string
+  state: FieldState
+  disabled: boolean
+  options: readonly string[]
+  optionLabel: (option: string) => string
+  onEdit: (text: string) => void
+}) {
+  const current = props.state.text.trim()
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' }}>
+      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsh-alias-label-primary)' }}>{props.label}</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px' }}>
+        {props.options.map((option) => (
+          <Checkbox
+            key={option}
+            checked={current === option}
+            disabled={props.disabled}
+            label={props.optionLabel(option)}
+            onChange={(next) => {
+              if (next) props.onEdit(option)
+            }}
+          />
+        ))}
+      </div>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsh-alias-label-tertiary)' }}>{props.hint}</p>
+    </div>
+  )
+}
 export function ContextImportsCard(props: ContextImportsCardProps) {
   const { t } = props
   if (props.view === 'summary') return t('description')
@@ -161,14 +196,14 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
         disabled={!state.writable}
         onEdit={(text) => props.edit('expandLoadedInstructions', text)}
       />
-      <TokensField
+      <RadioField
         id="plugin-config-context-imports-live-mode"
         label={t('liveMode')}
         hint={t('liveModeHint')}
         state={state.liveMode}
         disabled={!state.writable}
-        tokens={LIVE_MODES}
-        tokenLabel={(token) => t(`liveMode_${token.replace('+', '_')}`)}
+        options={LIVE_MODES}
+        optionLabel={(option) => t(`liveMode_${option.replace('+', '_')}`)}
         onEdit={(text) => props.edit('liveMode', text)}
       />
       <SettingsValueField
@@ -191,14 +226,7 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
           t('invalidNumber'),
         )}
       />
-      <BoolField
-        id="plugin-config-context-imports-expand-loaded"
-        label={t('expandLoadedInstructions')}
-        hint={t('expandLoadedInstructionsHint')}
-        state={state.expandLoadedInstructions}
-        disabled={!state.writable}
-        onEdit={(text) => props.edit('expandLoadedInstructions', text)}
-      />
+
       <SettingsValueField
         {...fieldProps(
           'instructionFiles',

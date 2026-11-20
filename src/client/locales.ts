@@ -276,7 +276,7 @@ export const ko: Record<string, string> = {
   minReinjectIntervalMs: '재주입 스로틀 (ms)',
   minReinjectIntervalMsHint: '같은 파일의 재주입 최소 간격 (잦은 변경 방지).',
 
-  expandLoadedInstructions: '加载된 모든 지시 파일의 참조 확장',
+  expandLoadedInstructions: '불러온 모든 지시 파일의 참조 확장',
   expandLoadedInstructionsHint: 'DSH가 실제로 불러온 지시 파일의 @경로 참조도 따라갑니다. 세션 중 자동으로 불러온 프로젝트 AGENTS.md도 포함합니다.',
   instructionFiles: '지시 파일 후보 이름',
   instructionFilesHint: '한 줄에 하나의 파일 이름. 이 파일들은 스캔만 되고 다시 주입되지 않습니다.',

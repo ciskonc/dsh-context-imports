@@ -11,7 +11,7 @@
  * kind, schemastery Config. Configuration rides the loader patch — no
  * settings registration needed.
  */
-import { appendFileSync, watch as fsWatchSync } from 'node:fs'
+import { watch as fsWatchSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -117,6 +117,7 @@ interface Wrapper {
   truncated: string
   missing: string
   omitted: string
+  outside: string
 }
 
 const WRAPPERS: Record<string, Wrapper> = {
@@ -124,31 +125,37 @@ const WRAPPERS: Record<string, Wrapper> = {
     truncated: 'truncated at',
     missing: 'referenced but not found',
     omitted: 'omitted: total byte budget reached',
+    outside: 'referenced but outside the workspace, refused',
   },
   zh: {
     truncated: '已截断于',
     missing: '被引用但文件不存在',
     omitted: '已省略：超出总字节预算',
+    outside: '被引用但在工作区之外，已拒绝',
   },
   ja: {
     truncated: 'バイト数で切り詰め:',
     missing: '参照されていますが見つかりません',
     omitted: '省略: 合計バイト予算に達しました',
+    outside: '参照先がワークスペース外のため拒否されました',
   },
   fr: {
     truncated: 'tronqué à',
     missing: 'référencé mais introuvable',
     omitted: 'omis : budget total d’octets atteint',
+    outside: 'référencé mais hors de l’espace de travail, refusé',
   },
   ru: {
     truncated: 'обрезано на',
     missing: 'указан, но не найден',
     omitted: 'пропущено: достигнут общий лимит байт',
+    outside: 'указан вне рабочей области, отказано',
   },
   ko: {
     truncated: '다음 바이트에서 잘림:',
     missing: '참조되었지만 찾을 수 없음',
     omitted: '생략됨: 전체 바이트 예산 도달',
+    outside: '참조된 파일이 작업 공간 밖에 있어 거부됨',
   },
 }
 
@@ -160,11 +167,16 @@ function wrapperFor(locale: string | undefined): Wrapper {
  * Import scanning
  * ------------------------------------------------------------------ */
 
-/** `@path` tokens: start of line (optionally bulleted) or inline after whitespace. Requires a file extension. */
-const IMPORT_RE = /(?:^|[\s>(])@((?:[\w.\-~]+[\/\\])*[\w.\-~]+\.[A-Za-z0-9]+)/gm
+/** `@path` tokens: start of line (optionally bulleted) or inline after whitespace. Requires a file extension. Unicode-aware so CJK path segments match. */
+const IMPORT_RE = /(?:^|[\s>(])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]+\.[A-Za-z0-9]+)/gmu
 
 function stripCodeFences(text: string): string {
   return text.replace(/^(`{3,}|~{3,})[\s\S]*?^\1/gm, '')
+}
+
+/** Editors round-trip a UTF-8 BOM; strip it so block dedup keys stay stable. */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
 }
 
 function findImports(text: string): string[] {
@@ -218,11 +230,29 @@ async function collectBundle(
   let missingCount = 0
   let omittedCount = 0
   let total = 0
+  // Workspace fence: every @-imported file must stay under the session cwd.
+  // Explicit config (`files`) is trusted and exempt; anything discovered by
+  // scanning (nested imports) is fenced, so a hostile instruction file
+  // cannot pull arbitrary machine files (e.g. ~/.dsh/.credentials.yaml)
+  // into the model's context.
+  const fence = resolve(cwd).toLowerCase()
 
   const enqueue = (abs: string, rel: string, depth: number, scanOnly: boolean) => {
     const key = abs.toLowerCase()
     if (seen.has(key)) return
     seen.add(key)
+    if (!scanOnly && !isAbsolute(rel)) {
+      const relToCwd = relative(resolve(cwd), abs)
+      if (relToCwd.startsWith('..') || isAbsolute(relToCwd)) {
+        // Outside the workspace: refuse to read, leave a visible note so the
+        // user knows why nothing appeared instead of a silent skip.
+        const note = `[${wrapper.outside}] ${rel}`
+        if (!already.has(note)) {
+          blocks.push(note)
+        }
+        return
+      }
+    }
     queue.push({ abs, rel, depth, scanOnly })
   }
 
@@ -264,11 +294,25 @@ async function collectBundle(
       truncatedAt = cfg.maxFileBytes
       raw = raw.subarray(0, cfg.maxFileBytes)
     }
-    const text = raw.toString('utf8')
+    const text = stripBom(raw.toString('utf8'))
+
+    // Scan for nested imports FIRST, on the UNTRUNCATED text: a byte cap that
+    // eats the tail of an AGENTS.md would silently drop its trailing @imports.
+    // We read the tail separately for scanning so imports survive truncation
+    // of the injected content.
+    let scanText = text
+    if (truncatedAt !== undefined) {
+      try {
+        const full = await readFile(item.abs, 'utf8')
+        scanText = stripBom(full)
+      } catch {
+        /* already have the truncated text */
+      }
+    }
 
     // Scan for nested imports first (content or scan-only alike).
     if (item.depth < cfg.maxDepth) {
-      for (const imp of findImports(text)) {
+      for (const imp of findImports(scanText)) {
         const abs = isAbsolute(imp) ? imp : resolve(dirname(item.abs), imp)
         enqueue(abs, imp, item.depth + 1, false)
       }
@@ -608,14 +652,39 @@ export function apply(ctx: Context, entry: Config): void {
   // --- Live mode state (all strong references cleaned on dispose) ---
   /** session → absolute paths injected into it (lower-cased keys). */
   const sessionFiles = new WeakMap<object, Set<string>>()
-  /** absolute path (lower-cased) → last re-injection time. */
-  const lastInjectAt = new Map<string, number>()
+  /** absolute path (lower-cased) → last CHANGE-driven wake time (churn throttle). */
+  const lastChangeAt = new Map<string, number>()
   /** absolute path (lower-cased) → fs watcher. */
   const watchers = new Map<string, import('node:fs').FSWatcher>()
-  /** live agents that may be woken on a watched-file change. */
-  const wakeTargets = new Set<{ agent: { session: object; followup?: (message: unknown) => void }; session: object }>()
+  /**
+   * Live agents that may be woken on a watched-file change, keyed by the
+   * SESSION object. A Set of {agent, session} literals dedups by reference,
+   * so every `agent/created` (and every re-registration path) pushed a fresh
+   * duplicate — turning one file change into N wakes for the same session.
+   * The plain Map (session -> agent) is needed for iteration; entries are
+   * deleted on agent/disposed so it cannot grow unbounded.
+   */
+  const wakeTargets = new Map<object, { agent: { session: object; followup?: (message: unknown) => void } }>()
+
+  function* wakeTargetEntries(): IterableIterator<[object, { agent: { session: object; followup?: (message: unknown) => void } }]> {
+    yield* wakeTargets
+  }
   /** absolute path (lower-cased) → sessions that have it injected. */
   const watchersByPath = new Map<string, Set<object>>()
+  /** (session,path) -> last wake sent time (millis) - burst dedup window. */
+  const lastWakeAt = new Map<string, number>()
+  // Session objects are not stringifiable; identify them for the wake-dedup
+  // key with a per-object counter instead (Map order = registration order).
+  let wakeSeq = 0
+  const wakeIds = new WeakMap<object, number>()
+  const wakeTargetsKeyId = (session: object): string => {
+    let id = wakeIds.get(session)
+    if (id === undefined) {
+      id = ++wakeSeq
+      wakeIds.set(session, id)
+    }
+    return String(id)
+  }
 
   const stopWatchIfUnused = (key: string): void => {
     const sessions = watchersByPath.get(key)
@@ -639,8 +708,10 @@ export function apply(ctx: Context, entry: Config): void {
     let watcher: import('node:fs').FSWatcher
     try {
       watcher = fsWatchSync(abs, { persistent: false }, () => {
-        // Debounce: editors on Windows often fire two events per save.
-        if (timer !== undefined) return
+        // Debounce: editors on Windows often fire two events per save, and a
+        // burst of events during the debounce window must collapse into ONE
+        // wake — the trailing timer keeps resetting while events keep coming.
+        if (timer !== undefined) clearTimeout(timer)
         timer = setTimeout(() => {
           timer = undefined
           onMaybeChanged(abs)
@@ -662,12 +733,20 @@ export function apply(ctx: Context, entry: Config): void {
     if (cfg.liveMode === 'off') return
     const key = abs.toLowerCase()
     const now = Date.now()
-    if (now - (lastInjectAt.get(key) ?? 0) < cfg.minReinjectIntervalMs) {
-      return
-    }
-    lastInjectAt.set(key, now)
-    for (const target of wakeTargets) {
-      if (!sessionFiles.get(target.session)?.has(key)) continue
+    // Churn throttle keys on CHANGE time, not injection time: keying on the
+    // injection made the throttle eat the very first change after an
+    // injection (up to minReinjectIntervalMs of silently dropped updates).
+    if (now - (lastChangeAt.get(key) ?? 0) < cfg.minReinjectIntervalMs) return
+    lastChangeAt.set(key, now)
+    for (const [sessionKey, target] of wakeTargetEntries()) {
+      if (!sessionFiles.get(sessionKey)?.has(key)) continue
+      // Burst dedup: one wake per (session, path) inside a short window -
+      // fs.watch can report the same save as several events and every wake
+      // costs the agent a whole turn.
+      const wakeKey = key + '\u0000' + wakeTargetsKeyId(sessionKey)
+      const wNow = Date.now()
+      if (wNow - (lastWakeAt.get(wakeKey) ?? 0) < Math.min(cfg.watchDebounceMs * 2, 10_000)) continue
+      lastWakeAt.set(wakeKey, wNow)
       if (cfg.liveMode === 'inject+wake') {
         // Wake turn: `followup(message)` queues an ordinary turn and wakes the
         // idle driver. The wake message uses its OWN source kind (not
@@ -705,6 +784,7 @@ export function apply(ctx: Context, entry: Config): void {
       watchers.clear()
       watchersByPath.clear()
       wakeTargets.clear()
+
     }
   }, 'dsh-context-imports: live watchers')
 
@@ -719,9 +799,8 @@ export function apply(ctx: Context, entry: Config): void {
     const allowed = cfg.injectOn.includes(scene)
     lastScene.set(payload.agent.session, allowed ? scene : 'suppressed')
     if (cfg.liveMode !== 'off' && allowed) {
-      wakeTargets.add({
+      wakeTargets.set(payload.agent.session as object, {
         agent: payload.agent as unknown as { session: object; followup?: (message: unknown) => void },
-        session: payload.agent.session as object,
       })
     }
     return undefined
@@ -730,9 +809,7 @@ export function apply(ctx: Context, entry: Config): void {
   ctx.on('agent/disposed', (payload): undefined => {
     const session = (payload as { agent?: { session?: object }; session?: object }).agent?.session ?? (payload as { session?: object }).session
     if (session === undefined) return undefined
-    wakeTargets.forEach((target) => {
-      if (target.session === session) wakeTargets.delete(target)
-    })
+    wakeTargets.delete(session as object)
     const injectedPaths = sessionFiles.get(session)
     if (injectedPaths !== undefined) {
       for (const key of injectedPaths) stopWatchIfUnused(key)
@@ -790,13 +867,11 @@ export function apply(ctx: Context, entry: Config): void {
         for (const abs of bundle.filePaths) {
           set.add(abs.toLowerCase())
           ensureWatch(session as object, abs)
-          lastInjectAt.set(abs.toLowerCase(), Date.now())
         }
         sessionFiles.set(session, set)
         if (cfg.liveMode === 'inject+wake') {
-          wakeTargets.add({
+          wakeTargets.set(session as object, {
             agent: agent as unknown as { session: object; followup?: (message: unknown) => void },
-            session: session as object,
           })
         }
       }
