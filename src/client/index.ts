@@ -11,7 +11,7 @@
  */
 import { ContextImportsCard, LIVE_MODES, SOURCES } from './ContextImportsCard.tsx'
 import type { ContextImportsCardState, Translate } from './ContextImportsCard.tsx'
-import { boolField, enumField, linesField, tokensField } from './form.ts'
+import { boolField, enumField, linesField, positiveNumberField, tokensField } from './form.ts'
 import type { FieldSpec } from './form.ts'
 import { en, fr, ja, ko, ru, zh } from './locales.ts'
 import { SettingsFormModel, settingsNumberField, settingsTextField } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -75,12 +75,12 @@ class ContextImportsCardController {
       boolField('scanImports'),
       boolField('expandLoadedInstructions'),
       enumField('liveMode', LIVE_MODES),
-      settingsNumberField('watchDebounceMs') as unknown as FieldSpec,
-      settingsNumberField('minReinjectIntervalMs') as unknown as FieldSpec,
+      positiveNumberField('watchDebounceMs'),
+      positiveNumberField('minReinjectIntervalMs'),
       linesField('instructionFiles'),
-      settingsNumberField('maxDepth') as unknown as FieldSpec,
-      settingsNumberField('maxFileBytes') as unknown as FieldSpec,
-      settingsNumberField('maxTotalBytes') as unknown as FieldSpec,
+      positiveNumberField('maxDepth'),
+      positiveNumberField('maxFileBytes'),
+      positiveNumberField('maxTotalBytes'),
       tokensField('injectOn', SOURCES),
       settingsTextField('template') as unknown as FieldSpec,
     ]

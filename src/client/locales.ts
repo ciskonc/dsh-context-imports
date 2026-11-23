@@ -51,6 +51,7 @@ export const en: Record<string, string> = {
   unsaved: 'Unsaved',
   saveFailed: 'The deployment did not accept these values; they were left for you to correct.',
   invalidNumber: 'Enter a number, or leave blank to use the default.',
+  invalidPositiveNumber: 'Enter a number greater than 0, or leave blank to use the default.',
   invalidTokens: 'Use only: startup, resume, clear, compact.',
 }
 
@@ -102,6 +103,7 @@ export const zh: Record<string, string> = {
   unsaved: '未保存',
   saveFailed: '本部署没有接受这些值，已保留供你修改。',
   invalidNumber: '请填数字；留空表示使用默认值。',
+  invalidPositiveNumber: '请填大于 0 的数字；留空表示使用默认值。',
   invalidTokens: '只能使用：startup、resume、clear、compact。',
 }
 
@@ -153,6 +155,7 @@ export const ja: Record<string, string> = {
   unsaved: '未保存',
   saveFailed: 'デプロイがこれらの値を受け付けませんでした。修正できるよう残してあります。',
   invalidNumber: '数値を入力するか、空欄にするとデフォルトを使います。',
+  invalidPositiveNumber: '0 より大きい数値を入力するか、空欄にするとデフォルトを使います。',
   invalidTokens: '使用できるのは startup、resume、clear、compact のみです。',
 }
 
@@ -255,6 +258,7 @@ export const ru: Record<string, string> = {
   unsaved: 'Не сохранено',
   saveFailed: 'Развёртывание не приняло эти значения; они сохранены для исправления.',
   invalidNumber: 'Введите число или оставьте пустым, чтобы использовать значение по умолчанию.',
+  invalidPositiveNumber: 'Введите число больше 0, или оставьте пустым, чтобы использовать значение по умолчанию.',
   invalidTokens: 'Допустимы только: startup, resume, clear, compact.',
 }
 
@@ -306,5 +310,6 @@ export const ko: Record<string, string> = {
   unsaved: '저장 안 됨',
   saveFailed: '배포가 이 값들을 받아들이지 않았습니다. 수정할 수 있도록 남겨 두었습니다.',
   invalidNumber: '숫자를 입력하거나, 비워 두면 기본값을 사용합니다.',
+  invalidPositiveNumber: '0보다 큰 숫자를 입력하거나, 비워 두면 기본값을 사용합니다.',
   invalidTokens: 'startup, resume, clear, compact만 사용할 수 있습니다.',
 }

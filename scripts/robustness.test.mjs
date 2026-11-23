@@ -439,6 +439,33 @@ const liveEntry = (over = {}) => ({
 })
 const waitOut = async () => new Promise((resolve) => setTimeout(resolve, 400))
 
+await check('the last edit of a burst still reaches the session (coalesced delivery)', async () => {
+  // Throttle keyed on the last DELIVERY: a burst of edits inside the window
+  // is coalesced, and the final edit must still be delivered afterwards
+  // (keying on the last CHANGE dropped it silently).
+  const session = makeSession(root, [])
+  const followups = []
+  const window_ms = 1500
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: window_ms }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 1, 'the first edit wakes once')
+  // Three more edits inside the throttle window: no immediate wake ...
+  for (const tag of ['A', 'B', 'C']) {
+    writeFileSync(join(root, 'imports', 'extra.md'), `BURST_${tag}\n`, 'utf8')
+    await new Promise((resolve) => setTimeout(resolve, 80))
+  }
+  assert.equal(followups.length, 1, `edits inside the window do not wake immediately, got ${followups.length}`)
+  // ... but once the window opens, the coalesced change is delivered
+  await new Promise((resolve) => setTimeout(resolve, window_ms + 800))
+  assert.ok(followups.length >= 2, `the last edit must still be delivered, got ${followups.length}`)
+  assert.ok(followups.length <= 3, `no wake storm, got ${followups.length}`)
+})
+
 await check('liveMode=off keeps 0.3.1 behaviour: injection but no wake', async () => {
   const session = makeSession(root, [])
   const followups = []

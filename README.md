@@ -78,7 +78,7 @@ The injected message is a `<system-reminder>` containing `<file path="...">` blo
 | `maxFileBytes` | `65536` | Per-file cap in bytes; larger files are truncated |
 | `maxTotalBytes` | `131072` | Total budget; files beyond it are skipped with a note |
 | `injectOn` | all four | Which session-start scenes trigger injection |
-| `liveMode` | `off` | Optional live mode (default off). Set in the settings page: `off` = same as 0.3.1, `inject` = re-inject changed files on next interaction, `inject+wake` = wake an idle agent right away |
+| `liveMode` | `off` | Optional live mode (default off). Set it in the settings page: `off` = same as 0.3.1, `inject` = re-inject changed files on the next interaction, `inject+wake` = wake an idle agent right away. A burst of edits inside the throttle window is coalesced, so the last edit still reaches every session |
 | `watchDebounceMs` | `30000` | Debounce window for file-change events |
 | `minReinjectIntervalMs` | `300000` | Minimum interval between re-injections of the same file (churn throttle) |
 | `detectedLocale` | `""` | Browser-resolved UI language, written by the client half so the host can wrap injected text in the interface language |
@@ -114,12 +114,19 @@ npm run build:client
 
 | Plugin version | DeepSeek Harness | Notes |
 |---|---|---|
-| **0.6.0** | **≥ 0.2.0**（tested on 0.2.2-rc.5 and 0.2.1-rc.5） | Current line. Adversarial-audit hardening: settings-page liveMode save fixed (string enum), workspace fence on scanned imports, CJK paths, wake-burst dedup. Incremental injection unchanged |
+| **0.6.1** | **≥ 0.2.0**（tested on 0.2.2-rc.5 and 0.2.1-rc.5） | Current line. Peer dependencies now name `@deepseek-ai/cosmokit` explicitly, so a standard install no longer resolves a cosmokit without `createVolatile` (that mismatch left the whole plugin silent and inactive). Settings reject non-positive numbers, multi-line fields render one entry per line, `@reference` after full-width punctuation is recognised, and a burst of edits no longer loses its last change |
+| 0.6.0 | ≥ 0.2.0（tested on 0.2.2-rc.5 and 0.2.1-rc.5） | Current line. Adversarial-audit hardening: settings-page liveMode save fixed (string enum), workspace fence on scanned imports, CJK paths, wake-burst dedup. Incremental injection unchanged |
 | 0.3.1 – 0.5.1 | ≥ 0.2.0-rc.1（0.3.1 tested on 0.2.1-rc.2 and 0.2.1-rc.3） | Adds `expandLoadedInstructions`: the imports of every instruction file the harness loaded are expanded, including a project AGENTS.md it brings in mid-session. Injection is incremental — a file already in the context is never sent twice. Needs the host's published instruction scopes (`agent-instructions` message source + `agent.inbox.nextStep`), so it targets DSH ≥ 0.2.0 |
 | 0.3.0 | ≥ 0.2.0-rc.1（tested on 0.2.1-rc.2） | Same feature, but the inbox lookup read `session.inbox` instead of `agent.inbox` and therefore never fired — the step-batch path carried the feature on its own. Fixed in 0.3.1 |
 | 0.2.3 | ≥ 0.1.7-rc.1（tested on 0.2.0-rc.1, 0.2.0-rc.2 and 0.2.1-rc.2） | Config access hardened: on DSH ≥ 0.2.0-rc.2 the volatile config projection no longer fills schema defaults, so every field is normalized at entry (0.2.2 could crash session creation or silently skip injection there). Note: on DSH ≥ 0.2.0-rc.2 install via `dsh plugin add` only — the loader verifies lockfile consistency, hand-copied node_modules are silently dropped |
 | 0.2.0 – 0.2.2 | ≥ 0.1.7-rc.1（0.2.1 tested on 0.1.7-rc.2 and 0.2.0-rc.1; 0.2.2 tested on 0.2.0-rc.1） | 0.2.2 fixed re-injection after compaction and settings-page mounting, but on DSH ≥ 0.2.0-rc.2 it can crash session creation (`injectOn.includes is not a function`) or silently skip injection (`cfg.files is not iterable`) — upgrade to 0.2.3 |
 | 0.1.x | 0.1.5-rc.1 – 0.1.5-rc.3（tested on 0.1.5-rc.2/rc.3） | Legacy line. **Does not work on 0.1.7** — it waits on the removed `settingsScope` service and the removed `agent/session-start` event |
+
+## Notes
+
+- **Configure live mode in the settings page, not by hand.** `dsh plugin add` and `pnpm add` rewrite this plugin's section of the profile patch, and a hand-written `liveMode` / `watchDebounceMs` / `minReinjectIntervalMs` in that section does not survive an install or upgrade. Set them once in Settings → Plugins → Context imports.
+- **Unsaved edits are dropped when the page reloads.** The host settings form offers Save only; there is no Discard button.
+- **A `@reference` without a file extension is reported as ignored** instead of being silently dropped - the scanner needs an extension to recognise a path.
 
 ## License
 

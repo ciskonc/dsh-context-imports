@@ -11,7 +11,7 @@
  * kind, schemastery Config. Configuration rides the loader patch — no
  * settings registration needed.
  */
-import { watch as fsWatchSync } from 'node:fs'
+import { statSync, watch as fsWatchSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -118,6 +118,7 @@ interface Wrapper {
   missing: string
   omitted: string
   outside: string
+  ignored: string
 }
 
 const WRAPPERS: Record<string, Wrapper> = {
@@ -125,36 +126,42 @@ const WRAPPERS: Record<string, Wrapper> = {
     truncated: 'truncated at',
     missing: 'referenced but not found',
     omitted: 'omitted: total byte budget reached',
+    ignored: 'ignored: reference without a file extension',
     outside: 'referenced but outside the workspace, refused',
   },
   zh: {
     truncated: '已截断于',
     missing: '被引用但文件不存在',
     omitted: '已省略：超出总字节预算',
+    ignored: '已忽略：引用没有文件扩展名',
     outside: '被引用但在工作区之外，已拒绝',
   },
   ja: {
     truncated: 'バイト数で切り詰め:',
     missing: '参照されていますが見つかりません',
     omitted: '省略: 合計バイト予算に達しました',
+    ignored: '参照にファイル拡張子が 없어無視しました',
     outside: '参照先がワークスペース外のため拒否されました',
   },
   fr: {
     truncated: 'tronqué à',
     missing: 'référencé mais introuvable',
     omitted: 'omis : budget total d’octets atteint',
+    ignored: 'ignoré : référence sans extension de fichier',
     outside: 'référencé mais hors de l’espace de travail, refusé',
   },
   ru: {
     truncated: 'обрезано на',
     missing: 'указан, но не найден',
     omitted: 'пропущено: достигнут общий лимит байт',
+    ignored: 'проигнорировано: ссылка без расширения файла',
     outside: 'указан вне рабочей области, отказано',
   },
   ko: {
     truncated: '다음 바이트에서 잘림:',
     missing: '참조되었지만 찾을 수 없음',
     omitted: '생략됨: 전체 바이트 예산 도달',
+    ignored: '무시됨: 파일 확장자가 없는 참조',
     outside: '참조된 파일이 작업 공간 밖에 있어 거부됨',
   },
 }
@@ -167,8 +174,21 @@ function wrapperFor(locale: string | undefined): Wrapper {
  * Import scanning
  * ------------------------------------------------------------------ */
 
-/** `@path` tokens: start of line (optionally bulleted) or inline after whitespace. Requires a file extension. Unicode-aware so CJK path segments match. */
-const IMPORT_RE = /(?:^|[\s>(])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]+\.[A-Za-z0-9]+)/gmu
+/**
+ * `@path` tokens: start of line (optionally bulleted) or inline after
+ * whitespace or punctuation. Requires a file extension. Unicode-aware so CJK
+ * path segments match, and the leading class includes Unicode punctuation so
+ * a reference after a full-width colon ("详见：@docs/x.md") is recognised.
+ */
+const IMPORT_RE = /(?:^|[\s>(\p{P}])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]+\.[A-Za-z0-9]+)/gmu
+
+/**
+ * References that look like a path but carry no extension: the scanner above
+ * ignores them, which would leave the user with no signal at all for e.g.
+ * `@../../Windows/System32/drivers/etc/hosts`. These are reported as ignored
+ * so a traversal attempt is never silently swallowed.
+ */
+const IMPORT_NO_EXT_RE = /(?:^|[\s>(\p{P}])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]*[^\s\p{P}]*)/gmu
 
 function stripCodeFences(text: string): string {
   return text.replace(/^(`{3,}|~{3,})[\s\S]*?^\1/gm, '')
@@ -185,6 +205,26 @@ function findImports(text: string): string[] {
   for (const match of clean.matchAll(IMPORT_RE)) {
     const p = match[1]
     if (p.includes('://')) continue
+    out.push(p)
+  }
+  return out
+}
+
+/**
+ * Path-looking references without a file extension. They never match the
+ * scanner, so they are collected separately and reported as ignored instead
+ * of disappearing without a trace.
+ */
+function findExtensionlessRefs(text: string): string[] {
+  const clean = stripCodeFences(text)
+  const out: string[] = []
+  for (const match of clean.matchAll(IMPORT_NO_EXT_RE)) {
+    const p = match[1]
+    if (p.length === 0) continue
+    if (p.includes('://')) continue
+    // A trailing dot or a word with no path shape is not a path reference.
+    if (!/[\/]/.test(p) && !/\.[A-Za-z0-9]/.test(p)) continue
+    if (/\.[A-Za-z0-9]+$/.test(p)) continue
     out.push(p)
   }
   return out
@@ -316,6 +356,13 @@ async function collectBundle(
         const abs = isAbsolute(imp) ? imp : resolve(dirname(item.abs), imp)
         enqueue(abs, imp, item.depth + 1, false)
       }
+    }
+    // A path-looking reference without an extension never matches the
+    // scanner. Report it, so a reference like @../../etc/hosts is visibly
+    // ignored rather than silently dropped.
+    for (const ref of findExtensionlessRefs(scanText)) {
+      const note = `[${wrapper.ignored}] ${ref}`
+      if (!already.has(note) && !blocks.includes(note)) blocks.push(note)
     }
 
     if (item.scanOnly) continue
@@ -671,8 +718,14 @@ export function apply(ctx: Context, entry: Config): void {
   }
   /** absolute path (lower-cased) → sessions that have it injected. */
   const watchersByPath = new Map<string, Set<object>>()
-  /** (session,path) -> last wake sent time (millis) - burst dedup window. */
+  /** (session,path) -> when the last wake was DELIVERED (millis). */
   const lastWakeAt = new Map<string, number>()
+  /** (session,path) -> file fingerprint delivered last time ("mtime:size"). */
+  const deliveredFingerprint = new Map<string, string>()
+  /** (session,path) -> a change that arrived inside the throttle window. */
+  const pendingWake = new Map<string, { abs: string; sessionKey: object }>()
+  /** Timer that re-checks coalesced changes once the throttle window opens. */
+  let pendingTimer: ReturnType<typeof setTimeout> | undefined
   // Session objects are not stringifiable; identify them for the wake-dedup
   // key with a per-object counter instead (Map order = registration order).
   let wakeSeq = 0
@@ -729,50 +782,90 @@ export function apply(ctx: Context, entry: Config): void {
     watchers.set(key, watcher)
   }
 
+  /** Cheap change fingerprint: mtime + size. */
+  const fingerprint = (abs: string): string => {
+    try {
+      const st = statSync(abs)
+      return `${st.mtimeMs}:${st.size}`
+    } catch {
+      return 'gone'
+    }
+  }
+
+  /**
+   * Send one wake to one session.
+   *
+   * The wake message carries its own source kind (`context-imports-wake`),
+   * so the pre-step inBatch guard cannot mistake the wake turn for an
+   * already-injected step; the changed file is injected by the regular gate
+   * inside that turn.
+   */
+  const deliverWake = (
+    wakeKey: string,
+    abs: string,
+    target: { agent: { session: object; followup?: (message: unknown) => void } },
+  ): void => {
+    lastWakeAt.set(wakeKey, Date.now())
+    deliveredFingerprint.set(wakeKey, fingerprint(abs))
+    if (cfg.liveMode !== 'inject+wake') return
+    try {
+      target.agent.followup?.(
+        createUserMessage({
+          content: [
+            {
+              type: 'text',
+              text:
+                `[dsh-context-imports] live update: an instruction-referenced file changed on disk ` +
+                `(${abs}). Its latest content is injected in this turn; treat the disk version as current.`,
+            },
+          ],
+          source: { kind: 'context-imports-wake', form: 'wake' },
+        }),
+      )
+    } catch (error) {
+      ctx.logger.warn('dsh-context-imports: wake failed: %o', error)
+    }
+  }
+
+  /**
+   * Re-check the coalesced changes once the throttle window has opened.
+   *
+   * A change is delivered only when the file still differs from what this
+   * session was last given, so a burst that ends where it started costs
+   * nothing - and the LAST edit of a burst is never lost.
+   */
+  const schedulePendingCheck = (): void => {
+    if (pendingTimer !== undefined) return
+    pendingTimer = setTimeout(() => {
+      pendingTimer = undefined
+      const due = [...pendingWake.entries()]
+      pendingWake.clear()
+      for (const [wakeKey, pending] of due) {
+        const target = wakeTargets.get(pending.sessionKey)
+        if (target === undefined) continue
+        if (fingerprint(pending.abs) === deliveredFingerprint.get(wakeKey)) continue
+        deliverWake(wakeKey, pending.abs, target)
+      }
+    }, cfg.minReinjectIntervalMs)
+    pendingTimer.unref?.()
+  }
+
   const onMaybeChanged = (abs: string): void => {
     if (cfg.liveMode === 'off') return
     const key = abs.toLowerCase()
     const now = Date.now()
-    // Churn throttle keys on CHANGE time, not injection time: keying on the
-    // injection made the throttle eat the very first change after an
-    // injection (up to minReinjectIntervalMs of silently dropped updates).
-    if (now - (lastChangeAt.get(key) ?? 0) < cfg.minReinjectIntervalMs) return
-    lastChangeAt.set(key, now)
     for (const [sessionKey, target] of wakeTargetEntries()) {
       if (!sessionFiles.get(sessionKey)?.has(key)) continue
-      // Burst dedup: one wake per (session, path) inside a short window -
-      // fs.watch can report the same save as several events and every wake
-      // costs the agent a whole turn.
       const wakeKey = key + '\u0000' + wakeTargetsKeyId(sessionKey)
-      const wNow = Date.now()
-      if (wNow - (lastWakeAt.get(wakeKey) ?? 0) < Math.min(cfg.watchDebounceMs * 2, 10_000)) continue
-      lastWakeAt.set(wakeKey, wNow)
-      if (cfg.liveMode === 'inject+wake') {
-        // Wake turn: `followup(message)` queues an ordinary turn and wakes the
-        // idle driver. The wake message uses its OWN source kind (not
-        // `context-imports`) so the pre-step inBatch guard does not mistake
-        // the wake turn for an already-injected step. The changed file is
-        // injected by the regular gate inside that turn.
-        try {
-          target.agent.followup?.(
-            createUserMessage({
-              content: [
-                {
-                  type: 'text',
-                  text:
-                    `[dsh-context-imports] live update: an instruction-referenced file changed on disk ` +
-                    `(${abs}). Its latest content is injected in this turn; treat the disk version as current.`,
-                },
-              ],
-              source: { kind: 'context-imports-wake', form: 'wake' },
-            }),
-          )
-        } catch (error) {
-          ctx.logger.warn('dsh-context-imports: wake failed: %o', error)
-        }
+      // Churn throttle: keyed on the last DELIVERY, not on the last change.
+      // A change inside the window is remembered and coalesced into the next
+      // delivery, so the final edit of a burst still reaches every session.
+      if (now - (lastWakeAt.get(wakeKey) ?? 0) < cfg.minReinjectIntervalMs) {
+        pendingWake.set(wakeKey, { abs, sessionKey })
+        schedulePendingCheck()
+        continue
       }
-      // 'inject' mode: no wake — the regular gate picks the change up on the
-      // next interaction.
+      deliverWake(wakeKey, abs, target)
     }
   }
 

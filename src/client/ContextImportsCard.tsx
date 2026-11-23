@@ -62,8 +62,6 @@ function formLabels(t: Translate) {
     saveFailed: t('saveFailed'),
     save: t('save'),
     saving: t('saving'),
-    discard: t('discard'),
-    unsaved: t('unsaved'),
   }
 }
 
@@ -159,6 +157,47 @@ function RadioField(props: {
     </div>
   )
 }
+/**
+ * 多行文本字段（显式注入文件 / 指令文件候选）。
+ *
+ * The official single-line value field joins the lines of a multi-line value
+ * into one row, which made "AGENTS.md" and "CLAUDE.md" read as a single file
+ * name. A plain textarea keeps one entry per line visible.
+ */
+function MultilineField(props: {
+  id: string
+  label: string
+  hint: string
+  state: FieldState
+  disabled: boolean
+  onEdit: (text: string) => void
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' }}>
+      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsh-alias-label-primary)' }}>{props.label}</span>
+      <textarea
+        id={props.id}
+        value={props.state.text}
+        disabled={props.disabled}
+        rows={Math.min(8, Math.max(3, props.state.text.split('\n').length))}
+        onChange={(event) => props.onEdit(event.target.value)}
+        style={{
+          width: '100%',
+          resize: 'vertical',
+          fontFamily: 'var(--dsh-alias-font-mono, monospace)',
+          fontSize: 12,
+          padding: 8,
+          borderRadius: 6,
+          border: '1px solid var(--dsh-alias-border-default)',
+          background: 'var(--dsh-alias-surface-default)',
+          color: 'var(--dsh-alias-label-primary)',
+        }}
+      />
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsh-alias-label-tertiary)' }}>{props.hint}</p>
+    </div>
+  )
+}
+
 export function ContextImportsCard(props: ContextImportsCardProps) {
   const { t } = props
   if (props.view === 'summary') return t('description')
@@ -179,7 +218,14 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
 
   return (
     <SettingsForm labels={formLabels(t)} state={state} onSave={props.save} onDiscard={props.discard}>
-      <SettingsValueField {...fieldProps('files', 'plugin-config-context-imports-files', t('files'), t('filesHint'), t('invalidNumber'))} />
+      <MultilineField
+        id="plugin-config-context-imports-files"
+        label={t('files')}
+        hint={t('filesHint')}
+        state={state.files}
+        disabled={!state.writable}
+        onEdit={(text) => props.edit('files', text)}
+      />
       <BoolField
         id="plugin-config-context-imports-scan"
         label={t('scanImports')}
@@ -213,7 +259,7 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
           'plugin-config-context-imports-watch-debounce',
           t('watchDebounceMs'),
           t('watchDebounceMsHint'),
-          t('invalidNumber'),
+          t('invalidPositiveNumber'),
         )}
       />
       <SettingsValueField
@@ -223,22 +269,21 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
           'plugin-config-context-imports-min-reinject',
           t('minReinjectIntervalMs'),
           t('minReinjectIntervalMsHint'),
-          t('invalidNumber'),
+          t('invalidPositiveNumber'),
         )}
       />
 
-      <SettingsValueField
-        {...fieldProps(
-          'instructionFiles',
-          'plugin-config-context-imports-instruction-files',
-          t('instructionFiles'),
-          t('instructionFilesHint'),
-          t('invalidNumber'),
-        )}
-      />
+        <MultilineField
+          id="plugin-config-context-imports-instruction-files"
+          label={t('instructionFiles')}
+          hint={t('instructionFilesHint')}
+          state={state.instructionFiles}
+          disabled={!state.writable}
+          onEdit={(text) => props.edit('instructionFiles', text)}
+        />
       <SettingsValueField
         numeric
-        {...fieldProps('maxDepth', 'plugin-config-context-imports-max-depth', t('maxDepth'), t('maxDepthHint'), t('invalidNumber'))}
+        {...fieldProps('maxDepth', 'plugin-config-context-imports-max-depth', t('maxDepth'), t('maxDepthHint'), t('invalidPositiveNumber'))}
       />
       <SettingsValueField
         numeric
@@ -247,7 +292,7 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
           'plugin-config-context-imports-max-file-bytes',
           t('maxFileBytes'),
           t('maxFileBytesHint'),
-          t('invalidNumber'),
+          t('invalidPositiveNumber'),
         )}
       />
       <SettingsValueField
@@ -257,7 +302,7 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
           'plugin-config-context-imports-max-total-bytes',
           t('maxTotalBytes'),
           t('maxTotalBytesHint'),
-          t('invalidNumber'),
+          t('invalidPositiveNumber'),
         )}
       />
       <TokensField

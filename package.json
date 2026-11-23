@@ -1,6 +1,6 @@
 {
   "name": "dsh-context-imports",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Claude Code-style @path imports for DSH: expands @imports in AGENTS.md/CLAUDE.md and injects the referenced files into model context at session start",
   "keywords": [
     "dsh-plugin",
@@ -26,10 +26,11 @@
   ],
   "license": "MIT",
   "peerDependencies": {
+    "@deepseek-ai/cosmokit": ">=1.8.6 <2",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-agent": ">=0.1.5-rc.2 <2",
     "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2 <2",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.19.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent": {

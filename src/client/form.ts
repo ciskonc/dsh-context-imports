@@ -71,3 +71,24 @@ export function enumField(field: string, allowed: readonly string[]): FieldSpec 
     },
   }
 }
+
+/**
+ * 正整数数值字段：非正数（或非数字）视为非法草稿，阻止保存。
+ *
+ * The host validates the TYPE of a number but not its range, so a negative
+ * debounce or byte cap would be accepted and land in the profile patch.
+ * The host normalizer clamps those at runtime, but a stored value that
+ * contradicts the running behaviour is worse than a rejected draft.
+ */
+export function positiveNumberField(field: string): FieldSpec {
+  return {
+    field,
+    format: (value) => (typeof value === 'number' && Number.isFinite(value) ? String(value) : ''),
+    parse: (text) => {
+      if (text.trim() === '') return { kind: 'clear' }
+      const parsed = Number(text)
+      if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+      return { kind: 'set', value: parsed }
+    },
+  }
+}
