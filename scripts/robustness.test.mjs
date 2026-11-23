@@ -466,6 +466,28 @@ await check('the last edit of a burst still reaches the session (coalesced deliv
   assert.ok(followups.length <= 3, `no wake storm, got ${followups.length}`)
 })
 
+await check('a @reference after full-width punctuation is recognised', async () => {
+  // Chinese documents write "详见：@docs/x.md" with a full-width colon;
+  // the scanner's leading class must include Unicode punctuation.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+  writeFileSync(join(root, 'AGENTS.md'), '# 根\n\n详见：@fullwidth.md\n', 'utf8')
+  writeFileSync(join(root, 'fullwidth.md'), 'FULLWIDTH_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.match(injected[0], /FULLWIDTH_MARKER/, 'full-width punctuation must not hide the reference')
+})
+
+await check('a path-looking reference without an extension is reported as ignored', async () => {
+  // "@../../Windows/System32/drivers/etc/hosts" has no extension, so the
+  // scanner ignores it - it must still be reported, never silently dropped.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+  writeFileSync(join(root, 'AGENTS.md'), '# 根\n\n@../../Windows/System32/drivers/etc/hosts\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.match(injected[0], /ignored|已忽略/, 'the extension-less reference must be reported')
+  assert.ok(!/\[fonts\]/.test(injected[0]), 'no content of an ignored reference may appear')
+})
+
 await check('liveMode=off keeps 0.3.1 behaviour: injection but no wake', async () => {
   const session = makeSession(root, [])
   const followups = []
