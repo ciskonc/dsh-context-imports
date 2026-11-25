@@ -128,6 +128,8 @@ npm run build:client
 - **Unsaved edits are dropped when the page reloads.** The host settings form offers Save only; there is no Discard button.
 - **A `@reference` without a file extension is reported as ignored** instead of being silently dropped - the scanner needs an extension to recognise a path.
 
+- **Closing a session tab does not stop live wakes** (the host reports no such event). Set **Wake scope** to "Only the session I used last" in the settings page so background sessions stop being woken.
+- **Settings changes take effect after the DSH instance restarts** - saving writes the profile, but the running session host keeps its loaded configuration until restart. This is a host behavior, and the save area in the settings card reminds you of it.
 ## License
 
 [MIT](LICENSE)

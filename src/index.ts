@@ -76,6 +76,8 @@ export interface Config {
    * additionally wakes an idle agent right away via `agent.followup`.
    */
   liveMode: 'off' | 'inject' | 'inject+wake'
+  /** Which sessions a file change may wake. `active` = only the session that ran a step last. */
+  wakeScope: 'all' | 'active'
   /** Debounce window for file-change events (editors often fire twice). */
   watchDebounceMs: number
   /** Minimum interval between re-injections of the same file (churn throttle). */
@@ -101,6 +103,7 @@ export const Config = z.object({
   maxTotalBytes: z.number().default(128 * 1024).volatile(),
   injectOn: z.array(z.string()).default([...SOURCES]).volatile(),
   liveMode: z.string().default('off').volatile(),
+  wakeScope: z.string().default('all').volatile(),
   watchDebounceMs: z.number().default(30_000).volatile(),
   minReinjectIntervalMs: z.number().default(300_000).volatile(),
   template: z.string().default('').volatile(),
@@ -119,6 +122,15 @@ interface Wrapper {
   omitted: string
   outside: string
   ignored: string
+  spaced: string
+  depthLimit: string
+  encoding: string
+  wakeChanged: string
+  wakeDeleted: string
+  /** Whole wake sentence for changed files; `{files}` is the joined list. */
+  wakeChangedText: string
+  /** Whole wake sentence for files that no longer exist; `{files}` is the joined list. */
+  wakeDeletedText: string
 }
 
 const WRAPPERS: Record<string, Wrapper> = {
@@ -127,6 +139,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: 'referenced but not found',
     omitted: 'omitted: total byte budget reached',
     ignored: 'ignored: reference without a file extension',
+    spaced: 'ignored: path contains a space - quote it as @"path with space/file.md"',
+    depthLimit: 'not expanded: import depth limit reached',
+    encoding: 'ignored: not UTF-8 text, cannot decode',
+    wakeChanged: 'referenced file(s) changed on disk',
+    wakeDeleted: 'referenced file(s) no longer exist',
+    wakeChangedText: '[dsh-context-imports] These referenced files changed on disk: {files}. Their latest content is injected in this turn. Where an earlier copy of the same file is still in the context, this copy supersedes it: use the newest version.',
+    wakeDeletedText: '[dsh-context-imports] These referenced files no longer exist, so they could not be injected this turn: {files}.',
     outside: 'referenced but outside the workspace, refused',
   },
   zh: {
@@ -134,6 +153,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: '被引用但文件不存在',
     omitted: '已省略：超出总字节预算',
     ignored: '已忽略：引用没有文件扩展名',
+    spaced: '已忽略：路径含空格，请用引号写成 @"含 空格/文件.md"',
+    depthLimit: '未展开：已达导入递归深度上限',
+    encoding: '已忽略：不是 UTF-8 文本，无法解码',
+    wakeChanged: '被引用的文件在磁盘上发生了变化',
+    wakeDeleted: '被引用的文件已不存在',
+    wakeChangedText: '[dsh-context-imports] 这些被引用的文件在磁盘上发生了变化：{files}。最新内容已在本轮注入。如果上下文里还留有同一文件的旧版本，以本轮这份为准。',
+    wakeDeletedText: '[dsh-context-imports] 这些被引用的文件已不存在，本轮无法注入：{files}。',
     outside: '被引用但在工作区之外，已拒绝',
   },
   ja: {
@@ -141,6 +167,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: '参照されていますが見つかりません',
     omitted: '省略: 合計バイト予算に達しました',
     ignored: '参照にファイル拡張子が 없어無視しました',
+    spaced: '無視しました：パスに空白があります。@"空白 を含む/ファイル.md" のように引用符で囲んでください',
+    depthLimit: '展開しませんでした：インポートの再帰深度の上限に達しました',
+    encoding: '無視しました：UTF-8 テキストではないためデコードできません',
+    wakeChanged: '参照されているファイルがディスク上で変化しました',
+    wakeDeleted: '参照されているファイルが存在しません',
+    wakeChangedText: '[dsh-context-imports] 参照している次のファイルがディスク上で変化しました：{files}。最新の内容をこのターンで注入しました。コンテキストに同じファイルの古いコピーが残っている場合は、このターンのものを優先してください。',
+    wakeDeletedText: '[dsh-context-imports] 参照している次のファイルが存在しないため、このターンでは注入できませんでした：{files}。',
     outside: '参照先がワークスペース外のため拒否されました',
   },
   fr: {
@@ -148,6 +181,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: 'référencé mais introuvable',
     omitted: 'omis : budget total d’octets atteint',
     ignored: 'ignoré : référence sans extension de fichier',
+    spaced: 'ignoré : le chemin contient un espace — mettez-le entre guillemets : @"chemin avec espace/fichier.md"',
+    depthLimit: 'non développé : limite de profondeur d\'import atteinte',
+    encoding: 'ignoré : texte non UTF-8, décodage impossible',
+    wakeChanged: 'fichier(s) référencé(s) modifié(s) sur le disque',
+    wakeDeleted: 'fichier(s) référencé(s) introuvables',
+    wakeChangedText: '[dsh-context-imports] Ces fichiers référencés ont changé sur le disque : {files}. Leur contenu à jour est injecté dans ce tour. Si une ancienne copie du même fichier est encore dans le contexte, celle-ci la remplace : utilisez la version la plus récente.',
+    wakeDeletedText: '[dsh-context-imports] Ces fichiers référencés n\'existent plus et n\'ont donc pas pu être injectés dans ce tour : {files}.',
     outside: 'référencé mais hors de l’espace de travail, refusé',
   },
   ru: {
@@ -155,6 +195,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: 'указан, но не найден',
     omitted: 'пропущено: достигнут общий лимит байт',
     ignored: 'проигнорировано: ссылка без расширения файла',
+    spaced: 'проигнорировано: в пути есть пробел — заключите его в кавычки: @"путь с пробелом/файл.md"',
+    depthLimit: 'не развёрнуто: достигнут предел глубины импорта',
+    encoding: 'проигнорировано: не UTF-8 текст, декодирование невозможно',
+    wakeChanged: 'файл(ы) по ссылке изменились на диске',
+    wakeDeleted: 'файл(ы) по ссылке больше не существуют',
+    wakeChangedText: '[dsh-context-imports] Эти указанные файлы изменились на диске: {files}. Их актуальное содержимое внедрено в этот ход. Если в контексте осталась старая копия того же файла, эта копия её заменяет: используйте последнюю версию.',
+    wakeDeletedText: '[dsh-context-imports] Эти указанные файлы больше не существуют, поэтому в этом ходе их не удалось внедрить: {files}.',
     outside: 'указан вне рабочей области, отказано',
   },
   ko: {
@@ -162,6 +209,13 @@ const WRAPPERS: Record<string, Wrapper> = {
     missing: '참조되었지만 찾을 수 없음',
     omitted: '생략됨: 전체 바이트 예산 도달',
     ignored: '무시됨: 파일 확장자가 없는 참조',
+    spaced: '무시됨: 경로에 공백이 있습니다 — @"공백 있는 경로/파일.md"처럼 따옴표로 묶으세요',
+    depthLimit: '펼치지 않음: 가져오기 재귀 깊이 한도에 도달했습니다',
+    encoding: '무시됨: UTF-8 텍스트가 아니어서 디코딩할 수 없습니다',
+    wakeChanged: '참조된 파일이 디스크에서 변경되었습니다',
+    wakeDeleted: '참조된 파일이 더 이상 존재하지 않습니다',
+    wakeChangedText: '[dsh-context-imports] 참조된 이 파일들이 디스크에서 변경되었습니다: {files}. 최신 내용이 이 턴에 주입되었습니다. 컨텍스트에 같은 파일의 이전 사본이 아직 있다면 이 턴의 사본이 우선합니다: 최신 버전을 사용하세요.',
+    wakeDeletedText: '[dsh-context-imports] 참조된 이 파일들이 더 이상 존재하지 않아 이 턴에 주입할 수 없었습니다: {files}.',
     outside: '참조된 파일이 작업 공간 밖에 있어 거부됨',
   },
 }
@@ -183,12 +237,59 @@ function wrapperFor(locale: string | undefined): Wrapper {
 const IMPORT_RE = /(?:^|[\s>(\p{P}])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]+\.[A-Za-z0-9]+)/gmu
 
 /**
+ * Quoted references: `@"我的 文档/说明.md"` / `@'my dir/file.md'`.
+ *
+ * A path with spaces cannot be recognised by the plain scanner (the path
+ * class stops at the space), so the quoted form is the supported way to
+ * reference such a file. Without it, a Windows project folder like
+ * "我的文档" would be silently dropped.
+ */
+const IMPORT_QUOTED_RE = /(?:^|[\s>(\p{P}])@(["'])([^"'\n]+?)\1/gmu
+
+/**
  * References that look like a path but carry no extension: the scanner above
  * ignores them, which would leave the user with no signal at all for e.g.
  * `@../../Windows/System32/drivers/etc/hosts`. These are reported as ignored
  * so a traversal attempt is never silently swallowed.
  */
 const IMPORT_NO_EXT_RE = /(?:^|[\s>(\p{P}])@((?:[\p{L}\p{N}._\-~]+[\/\\])*[\p{L}\p{N}._\-~]*[^\s\p{P}]*)/gmu
+
+/**
+ * A reference whose path contains a space but is not quoted: the plain
+ * scanner stops at the space, so nothing would be injected and nothing
+ * would be reported. This pattern detects the shape so the reference can
+ * be reported as ignored (with a hint about the quoted form).
+ *
+ * The separator must be a real space or tab and never a line break: with
+ * `\s` here, two references on consecutive lines ("@a.md\n@b.md") were
+ * read as ONE spaced path, and the first line was wrongly reported as
+ * "path contains a space" on every round.
+ */
+const IMPORT_SPACED_RE = /(?:^|[\s>(\p{P}])@([^\s"'\n]+[ \t][^\s"'\n]*?\.[A-Za-z0-9]+)/gmu
+
+/**
+ * Decode a buffer as text.
+ *
+ * UTF-8 first; when the result contains replacement characters (the classic
+ * sign of a GBK/ANSI file read as UTF-8), fall back to GB18030 - the usual
+ * encoding of Chinese Windows files. When neither works, report it instead of
+ * injecting mojibake.
+ */
+function decodeText(raw: Buffer): { text: string; encoding: 'utf8' | 'gb18030' | 'undecodable' } {
+  try {
+    const strict = new TextDecoder('utf-8', { fatal: true }).decode(raw)
+    return { text: strict, encoding: 'utf8' }
+  } catch {
+    /* not valid UTF-8 */
+  }
+  try {
+    const gb = new TextDecoder('gb18030', { fatal: false }).decode(raw)
+    if (!gb.includes('\uFFFD')) return { text: gb, encoding: 'gb18030' }
+  } catch {
+    /* decoder unavailable */
+  }
+  return { text: raw.toString('utf8'), encoding: 'undecodable' }
+}
 
 function stripCodeFences(text: string): string {
   return text.replace(/^(`{3,}|~{3,})[\s\S]*?^\1/gm, '')
@@ -202,9 +303,53 @@ function stripBom(text: string): string {
 function findImports(text: string): string[] {
   const clean = stripCodeFences(text)
   const out: string[] = []
-  for (const match of clean.matchAll(IMPORT_RE)) {
+  // Quoted references first, and their span is removed from the text so the
+  // plain scanner cannot pick up the tail of a quoted path as a second
+  // reference.
+  const quotedSpans: Array<[number, number]> = []
+  for (const match of clean.matchAll(IMPORT_QUOTED_RE)) {
+    // The regex has no capturing group for the leading class, so the quote
+    // mark is match[1] and the path is match[2].
+    const p = match[2].trim()
+    if (p.length === 0 || p.includes('://')) continue
+    out.push(p)
+    quotedSpans.push([match.index ?? 0, (match.index ?? 0) + match[0].length])
+  }
+  const withoutQuoted = maskSpans(clean, quotedSpans)
+  for (const match of withoutQuoted.matchAll(IMPORT_RE)) {
     const p = match[1]
     if (p.includes('://')) continue
+    out.push(p)
+  }
+  return out
+}
+
+/** Blank out the given spans so later regex passes skip them. */
+function maskSpans(text: string, spans: Array<[number, number]>): string {
+  if (spans.length === 0) return text
+  const chars = [...text]
+  for (const [start, end] of spans) {
+    for (let i = start; i < end && i < chars.length; i++) chars[i] = ' '
+  }
+  return chars.join('')
+}
+
+/**
+ * Unquoted references whose path contains a space. The plain scanner stops at
+ * the space, so these would vanish without a trace - the user would only
+ * notice a missing file. They are reported so the plugin can say why.
+ */
+function findSpacedRefs(text: string): string[] {
+  const clean = stripCodeFences(text)
+  const out: string[] = []
+  const quotedSpans: Array<[number, number]> = []
+  for (const match of clean.matchAll(IMPORT_QUOTED_RE)) {
+    quotedSpans.push([match.index ?? 0, (match.index ?? 0) + match[0].length])
+  }
+  const masked = maskSpans(clean, quotedSpans)
+  for (const match of masked.matchAll(IMPORT_SPACED_RE)) {
+    const p = match[1].trim()
+    if (p.length === 0 || p.includes('://')) continue
     out.push(p)
   }
   return out
@@ -250,6 +395,8 @@ interface Bundle {
   blocks: string[]
   /** Absolute paths of the files actually injected this round (watch list source). */
   filePaths: string[]
+  /** Absolute path (lower-cased) -> the label used in the injection block. */
+  fileLabels: Map<string, string>
   fileCount: number
   missingCount: number
   omittedCount: number
@@ -266,6 +413,7 @@ async function collectBundle(
   const queue: QueueItem[] = []
   const blocks: string[] = []
   const filePaths: string[] = []
+  const fileLabels = new Map<string, string>()
   let fileCount = 0
   let missingCount = 0
   let omittedCount = 0
@@ -329,10 +477,27 @@ async function collectBundle(
       }
       continue
     }
+    // Decide the encoding on the WHOLE file, before any truncation: a byte
+    // cap can cut a multi-byte character in half and produce a replacement
+    // character even in a perfectly valid UTF-8 file, and that must not be
+    // mistaken for "this file is not UTF-8".
+    const decoded = decodeText(raw)
+    if (decoded.encoding === 'undecodable') {
+      if (!item.scanOnly) {
+        const note = `[${wrapper.encoding}] ${item.rel}`
+        if (!already.has(note) && !blocks.includes(note)) blocks.push(note)
+      }
+      continue
+    }
+    // Re-encode to the detected encoding so byte-based limits and budgets
+    // keep operating on the file's real bytes rather than on UTF-8 length.
+    const full = Buffer.from(decoded.text, 'utf8')
     let truncatedAt: number | undefined
-    if (raw.byteLength > cfg.maxFileBytes) {
+    if (full.byteLength > cfg.maxFileBytes) {
       truncatedAt = cfg.maxFileBytes
-      raw = raw.subarray(0, cfg.maxFileBytes)
+      raw = full.subarray(0, cfg.maxFileBytes)
+    } else {
+      raw = full
     }
     const text = stripBom(raw.toString('utf8'))
 
@@ -356,12 +521,26 @@ async function collectBundle(
         const abs = isAbsolute(imp) ? imp : resolve(dirname(item.abs), imp)
         enqueue(abs, imp, item.depth + 1, false)
       }
+    } else {
+      // The chain continues past the depth limit: say so, otherwise the
+      // reader finds an @reference in the injected text that was never
+      // expanded and assumes the plugin is broken.
+      for (const imp of findImports(scanText)) {
+        const note = `[${wrapper.depthLimit} ${cfg.maxDepth}] ${imp}`
+        if (!already.has(note) && !blocks.includes(note)) blocks.push(note)
+      }
     }
     // A path-looking reference without an extension never matches the
     // scanner. Report it, so a reference like @../../etc/hosts is visibly
     // ignored rather than silently dropped.
     for (const ref of findExtensionlessRefs(scanText)) {
       const note = `[${wrapper.ignored}] ${ref}`
+      if (!already.has(note) && !blocks.includes(note)) blocks.push(note)
+    }
+    // A path with a space that is not quoted would silently vanish: report
+    // it with the quoted form the user should use.
+    for (const ref of findSpacedRefs(scanText)) {
+      const note = `[${wrapper.spaced}] ${ref}`
       if (!already.has(note) && !blocks.includes(note)) blocks.push(note)
     }
 
@@ -382,10 +561,11 @@ async function collectBundle(
     total += raw.byteLength
     blocks.push(block)
     filePaths.push(item.abs)
+    fileLabels.set(item.abs.toLowerCase(), item.rel)
     fileCount++
   }
 
-  return { blocks, filePaths, fileCount, missingCount, omittedCount }
+  return { blocks, filePaths, fileLabels, fileCount, missingCount, omittedCount }
 }
 
 /* ------------------------------------------------------------------ *
@@ -675,6 +855,10 @@ function normalizeConfig(entry: Config): Config {
       const v = unwrap(e.liveMode)
       return v === 'inject' || v === 'inject+wake' || v === 'off' ? v : 'off'
     })(),
+    wakeScope: (() => {
+      const v = unwrap(e.wakeScope)
+      return v === 'active' ? 'active' : 'all'
+    })(),
     watchDebounceMs: num(e.watchDebounceMs, 30_000),
     minReinjectIntervalMs: num(e.minReinjectIntervalMs, 300_000),
     template: typeof unwrap(e.template) === 'string' ? (unwrap(e.template) as string) : '',
@@ -684,9 +868,19 @@ function normalizeConfig(entry: Config): Config {
 
 export function apply(ctx: Context, entry: Config): void {
   // 0.1.7+: the loader owns configuration. The entry config IS the resolved
-  // value — user edits ride the profile patch, which reloads this fiber with
-  // the updated config. No installSection, no settings thunk.
+  // value at APPLY time. Measured on the host (2026-11-25): a settings-page
+  // save writes the profile patch but does NOT reload this fiber — the new
+  // values are picked up only when the fiber re-materializes (instance
+  // restart, plugin code reload). Keep this comment truthful: do not promise
+  // live effect.
   const cfg = normalizeConfig(entry)
+
+  /**
+   * Localized status lines, shared by the injection blocks and the live wake
+   * message. The wake message used to be hard-coded English, which stood out
+   * in a Chinese session.
+   */
+  const wrapper = wrapperFor(cfg.detectedLocale || undefined)
 
   // Which creation scene fired last, per session. `agent/pre-step` has no
   // scene concept, so the `agent/created` listener records it and the
@@ -713,6 +907,17 @@ export function apply(ctx: Context, entry: Config): void {
    */
   const wakeTargets = new Map<object, { agent: { session: object; followup?: (message: unknown) => void } }>()
 
+  /**
+   * The session that most recently ran a step caused by the USER (not by one
+   * of our own wakes). It is the only signal available for "which session is
+   * the user actually looking at": the host emits no event when a tab is
+   * closed or a session is archived, and the Agent object carries no such
+   * flag either (checked against dsh-agent 0.2.2-rc.5).
+   *
+   * wakeScope=active wakes only this session, so a tab the user closed stops
+   * spending tokens in the background.
+   */
+  let activeSession: object | undefined
   function* wakeTargetEntries(): IterableIterator<[object, { agent: { session: object; followup?: (message: unknown) => void } }]> {
     yield* wakeTargets
   }
@@ -726,6 +931,20 @@ export function apply(ctx: Context, entry: Config): void {
   const pendingWake = new Map<string, { abs: string; sessionKey: object }>()
   /** Timer that re-checks coalesced changes once the throttle window opens. */
   let pendingTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Changes seen in the current debounce window, keyed by absolute path.
+   *
+   * Every watched file used to own its own debounce timer, so saving three
+   * files produced three independent timers and three separate wakes - each
+   * one a full extra model turn, and only the first actually injected the
+   * new content. One batch timer for the whole fiber turns a burst into a
+   * single wake that names every changed file.
+   */
+  const changeBatch = new Map<string, string>()
+  /** Timer that flushes the change batch into one wake per session. */
+  let batchTimer: ReturnType<typeof setTimeout> | undefined
+  /** absolute path (lower-cased) -> the label used in injection blocks. */
+  const pathLabels = new Map<string, string>()
   // Session objects are not stringifiable; identify them for the wake-dedup
   // key with a per-object counter instead (Map order = registration order).
   let wakeSeq = 0
@@ -757,19 +976,19 @@ export function apply(ctx: Context, entry: Config): void {
     }
     sessions.add(session)
     if (watchers.has(key)) return
-    let timer: ReturnType<typeof setTimeout> | undefined
     let watcher: import('node:fs').FSWatcher
     try {
       watcher = fsWatchSync(abs, { persistent: false }, () => {
-        // Debounce: editors on Windows often fire two events per save, and a
-        // burst of events during the debounce window must collapse into ONE
-        // wake — the trailing timer keeps resetting while events keep coming.
-        if (timer !== undefined) clearTimeout(timer)
-        timer = setTimeout(() => {
-          timer = undefined
-          onMaybeChanged(abs)
+        // One debounce timer for the whole fiber: a save burst across
+        // several files becomes a single wake that lists them all, instead
+        // of one wake (one model turn) per file.
+        changeBatch.set(abs, abs)
+        if (batchTimer !== undefined) clearTimeout(batchTimer)
+        batchTimer = setTimeout(() => {
+          batchTimer = undefined
+          flushChanges()
         }, cfg.watchDebounceMs)
-        timer.unref?.()
+        batchTimer.unref?.()
       })
     } catch {
       // File vanished between listing and watching: not fatal, the next
@@ -814,9 +1033,7 @@ export function apply(ctx: Context, entry: Config): void {
           content: [
             {
               type: 'text',
-              text:
-                `[dsh-context-imports] live update: an instruction-referenced file changed on disk ` +
-                `(${abs}). Its latest content is injected in this turn; treat the disk version as current.`,
+              text: wakeText([abs]),
             },
           ],
           source: { kind: 'context-imports-wake', form: 'wake' },
@@ -827,26 +1044,120 @@ export function apply(ctx: Context, entry: Config): void {
     }
   }
 
+  /** Label of a file as the injection blocks show it (relative to the session). */
+  const labelOf = (abs: string): string => pathLabels.get(abs.toLowerCase()) ?? abs
+
   /**
-   * Re-check the coalesced changes once the throttle window has opened.
+   * The wake message.
+   *
+   * It must match reality: a file that disappeared is reported as gone, and
+   * a file that changed says its content follows. The old wording claimed
+   * "its latest content is injected in this turn" even when nothing was
+   * injected, which made the model state things that had not happened.
+   */
+  const wakeText = (files: string[]): string => {
+    const changed = files.filter((f) => fingerprint(f) !== 'gone')
+    const gone = files.filter((f) => fingerprint(f) === 'gone')
+    const parts: string[] = []
+    if (changed.length > 0) {
+      parts.push(wrapper.wakeChangedText.replace('{files}', changed.map(labelOf).join(', ')))
+    }
+    if (gone.length > 0) {
+      parts.push(wrapper.wakeDeletedText.replace('{files}', gone.map(labelOf).join(', ')))
+    }
+    return parts.join(' ')
+  }
+
+  /**
+   * Flush the debounced change batch: one wake per session, listing every
+   * changed file that session actually holds.
+   */
+  const flushChanges = (): void => {
+    if (changeBatch.size === 0) return
+    const changed = [...changeBatch.values()]
+    changeBatch.clear()
+    for (const [sessionKey, target] of wakeTargetEntries()) {
+      // wakeScope=active: a closed tab cannot be detected, but it is not the
+      // session the user stepped in last, so it is not woken.
+      if (cfg.wakeScope === 'active' && sessionKey !== activeSession) continue
+      const held = sessionFiles.get(sessionKey)
+      if (held === undefined) continue
+      const mine = changed.filter((abs) => held.has(abs.toLowerCase()))
+      if (mine.length === 0) continue
+      // Throttle per file; files inside the window wait for the next check.
+      const deliverable: string[] = []
+      for (const abs of mine) {
+        const wakeKey = abs.toLowerCase() + '\u0000' + wakeTargetsKeyId(sessionKey)
+        const now = Date.now()
+        if (now - (lastWakeAt.get(wakeKey) ?? 0) < cfg.minReinjectIntervalMs) {
+          pendingWake.set(wakeKey, { abs, sessionKey })
+          schedulePendingCheck()
+          continue
+        }
+        deliverable.push(abs)
+      }
+      if (deliverable.length === 0) continue
+      for (const abs of deliverable) {
+        const wakeKey = abs.toLowerCase() + '\u0000' + wakeTargetsKeyId(sessionKey)
+        lastWakeAt.set(wakeKey, Date.now())
+        deliveredFingerprint.set(wakeKey, fingerprint(abs))
+      }
+      if (cfg.liveMode !== 'inject+wake') continue
+      try {
+        target.agent.followup?.(
+          createUserMessage({
+            content: [{ type: 'text', text: wakeText(deliverable) }],
+            source: { kind: 'context-imports-wake', form: 'wake' },
+          }),
+        )
+      } catch (error) {
+        ctx.logger.warn('dsh-context-imports: wake failed: %o', error)
+      }
+    }
+  }
+
+  /**
+   * Deliver coalesced changes as soon as THEIR throttle window opens.
    *
    * A change is delivered only when the file still differs from what this
    * session was last given, so a burst that ends where it started costs
    * nothing - and the LAST edit of a burst is never lost.
+   *
+   * The wait is "until the earliest pending window opens", not "a full
+   * throttle from now". The window is measured from the last DELIVERY, which
+   * is already partly in the past when a change is queued; waiting a full
+   * throttle from the queue time delivered late changes up to a whole
+   * throttle after the window had opened (seen on a real host as a wake
+   * arriving about four minutes late). Changes whose window has not opened
+   * yet stay queued and are rescheduled.
    */
   const schedulePendingCheck = (): void => {
     if (pendingTimer !== undefined) return
+    // The earliest moment any pending change may be delivered.
+    let opensAt = Number.POSITIVE_INFINITY
+    for (const [wakeKey] of pendingWake) {
+      const at = (lastWakeAt.get(wakeKey) ?? 0) + cfg.minReinjectIntervalMs
+      if (at < opensAt) opensAt = at
+    }
+    if (!Number.isFinite(opensAt)) return
+    const delay = Math.max(0, opensAt - Date.now())
     pendingTimer = setTimeout(() => {
       pendingTimer = undefined
-      const due = [...pendingWake.entries()]
-      pendingWake.clear()
+      const now = Date.now()
+      const due: Array<[string, { abs: string; sessionKey: object }]> = []
+      for (const [wakeKey, pending] of pendingWake) {
+        if (now - (lastWakeAt.get(wakeKey) ?? 0) >= cfg.minReinjectIntervalMs) due.push([wakeKey, pending])
+      }
       for (const [wakeKey, pending] of due) {
+        pendingWake.delete(wakeKey)
         const target = wakeTargets.get(pending.sessionKey)
         if (target === undefined) continue
         if (fingerprint(pending.abs) === deliveredFingerprint.get(wakeKey)) continue
         deliverWake(wakeKey, pending.abs, target)
       }
-    }, cfg.minReinjectIntervalMs)
+      // Anything still inside its window is retried when that window opens.
+      if (pendingWake.size > 0) schedulePendingCheck()
+    }, delay)
     pendingTimer.unref?.()
   }
 
@@ -855,6 +1166,7 @@ export function apply(ctx: Context, entry: Config): void {
     const key = abs.toLowerCase()
     const now = Date.now()
     for (const [sessionKey, target] of wakeTargetEntries()) {
+      if (cfg.wakeScope === 'active' && sessionKey !== activeSession) continue
       if (!sessionFiles.get(sessionKey)?.has(key)) continue
       const wakeKey = key + '\u0000' + wakeTargetsKeyId(sessionKey)
       // Churn throttle: keyed on the last DELIVERY, not on the last change.
@@ -924,6 +1236,9 @@ export function apply(ctx: Context, entry: Config): void {
     const inboxNextStep = (agent as { inbox?: { nextStep?: readonly unknown[] } }).inbox?.nextStep ?? []
     const inBatch = decision.messages.some((m) => isOursSource((m as { source?: unknown }).source))
     if (inBatch) return decision
+    // A step that is not one of our wakes means the user is driving this
+    // session: it becomes the active one.
+    activeSession = session
 
     // No recorded scene (fiber reloaded after a hot swap, or the agent was
     // created before this plugin activated): treat as startup so long-lived
@@ -959,6 +1274,10 @@ export function apply(ctx: Context, entry: Config): void {
         const set = sessionFiles.get(session) ?? new Set<string>()
         for (const abs of bundle.filePaths) {
           set.add(abs.toLowerCase())
+          // Remember the label this file was injected under, so the wake
+          // message names it the way the injection block does.
+          const label = bundle.fileLabels.get(abs.toLowerCase())
+          if (label !== undefined) pathLabels.set(abs.toLowerCase(), label)
           ensureWatch(session as object, abs)
         }
         sessionFiles.set(session, set)

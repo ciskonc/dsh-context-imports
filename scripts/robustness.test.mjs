@@ -15,7 +15,7 @@
  *   - the host's three instruction-scope sources (inbox / batch / surface)
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -138,6 +138,44 @@ async function runPlugin({ entry, session, scene = 'startup', inbox = [], captur
   return { injected, decision, result }
 }
 
+/**
+ * One plugin instance driving several sessions - the shape of a real host,
+ * where every session shares the same fiber (and therefore the same watcher
+ * set and the same "active session"). runPlugin applies the plugin once per
+ * call, which is right for single-session cases but cannot observe anything
+ * that spans sessions. `steps` is an ordered list of { session, capture },
+ * each run as one user step in that order; the LAST one is the active session.
+ */
+async function runPluginMulti({ entry, steps, scene = 'startup' }) {
+  const listeners = new Map()
+  const disposers = []
+  const ctx = {
+    logger: { info() {}, warn() {} },
+    effect(factory) {
+      const dispose = factory()
+      if (typeof dispose === 'function') disposers.push(dispose)
+    },
+    on(event, handler) {
+      listeners.set(event, handler)
+    },
+  }
+  apply(ctx, entry)
+  const created = listeners.get('agent/created')
+  const preStep = listeners.get('agent/pre-step')
+  let n = 0
+  for (const { session, capture } of steps) {
+    const id = `agent-${++n}`
+    if (created) created({ source: scene, agent: { session, id } })
+    const agent = { session, id, inbox: { nextStep: [] }, followup: capture ? (m) => capture(m) : undefined }
+    const decision = { kind: 'continue', messages: [] }
+    if (preStep) await preStep({ agent, signal: new AbortController().signal }, async () => decision)
+  }
+  return {
+    dispose() {
+      for (const d of disposers.splice(0)) d()
+    },
+  }
+}
 const defaultEntry = {
   files: [],
   scanImports: true,
@@ -488,6 +526,304 @@ await check('a path-looking reference without an extension is reported as ignore
   assert.ok(!/\[fonts\]/.test(injected[0]), 'no content of an ignored reference may appear')
 })
 
+await check('a quoted path with spaces is injected', async () => {
+  // Windows folders with spaces are common; the quoted form is how a
+  // reference to such a file is expressed.
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+  mkdirSync(join(root, 'my docs'), { recursive: true })
+  writeFileSync(join(root, 'AGENTS.md'), '# root\n\nsee @"my docs/plan.md"\n', 'utf8')
+  writeFileSync(join(root, 'my docs', 'plan.md'), 'SPACED_PATH_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.match(injected[0], /SPACED_PATH_MARKER/, 'quoted path must be injected')
+})
+
+await check('an unquoted path with spaces is reported, not dropped silently', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+  mkdirSync(join(root, 'my docs'), { recursive: true })
+  writeFileSync(join(root, 'AGENTS.md'), '# root\n\nsee @my docs/plan.md\n', 'utf8')
+  writeFileSync(join(root, 'my docs', 'plan.md'), 'SPACED_PATH_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.ok(!injected[0].includes('SPACED_PATH_MARKER'), 'unquoted spaced path is not injected')
+  assert.match(injected[0], /space|空格/, `the spaced path must be reported; got ${injected[0].slice(0, 160)}`)
+})
+
+await check('a GBK file is decoded through the GB18030 fallback', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+    // GBK bytes of a short Chinese header line followed by the ASCII word GBK.
+    const gbk = Buffer.from([0x23, 0x20, 0xba, 0xc5, 0xbe, 0xdd, 0x0a, 0x47, 0x42, 0x4b, 0x0a])
+  writeFileSync(join(root, 'AGENTS.md'), '# root\n\n@gbk.md\n', 'utf8')
+  writeFileSync(join(root, 'gbk.md'), gbk)
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.ok(!injected[0].includes('\uFFFD'), 'no replacement characters may reach the model')
+  assert.match(injected[0], /GBK/, 'the fallback decoding must deliver the content')
+})
+
+await check('the import depth limit is reported', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-ci-'))
+  writeFileSync(join(root, 'AGENTS.md'), '# root\n\n@a.md\n', 'utf8')
+  writeFileSync(join(root, 'a.md'), '# a\n\n@b.md\n', 'utf8')
+  writeFileSync(join(root, 'b.md'), '# b\n\n@c.md\n', 'utf8')
+  writeFileSync(join(root, 'c.md'), '# c\n\n@d.md\n', 'utf8')
+  writeFileSync(join(root, 'd.md'), 'DEEP_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(root, []) })
+  assert.equal(injected.length, 1)
+  assert.ok(!injected[0].includes('DEEP_MARKER'), 'files past the depth limit are not injected')
+  assert.match(injected[0], /depth|深度/, `the depth limit must be reported; got ${injected[0].slice(0, 200)}`)
+})
+
+await check('the wake message is one language and names the file by its injected label', async () => {
+  // The wake text used to be half a localized heading and half a hard-coded
+  // English sentence, and it named the file by absolute path while the
+  // injection block used a relative one.
+  const session = makeSession(root, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 50, detectedLocale: 'zh' }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  watchFile(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  assert.equal(followups.length, 1)
+  const text = followups[0]?.content?.[0]?.text ?? ''
+  assert.match(text, /\u53d1\u751f\u4e86\u53d8\u5316/, 'the heading is localized')
+  assert.ok(!/[A-Za-z]{4,}\s+[A-Za-z]{4,}\s+[A-Za-z]{4,}/.test(text.replace('dsh-context-imports', '')),
+    `no English sentence may follow the localized heading; got: ${text}`)
+  assert.ok(text.includes('imports/extra.md'), `the file is named by its injected label; got: ${text}`)
+  assert.ok(!text.includes(root), `the absolute path must not appear; got: ${text}`)
+})
+
+await check('a wake caused by several files is one message listing all of them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-batch-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/m1.md\n@imports/m2.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'm1.md'), 'M1\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'm2.md'), 'M2\n', 'utf8')
+  const session = makeSession(dir, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 120, minReinjectIntervalMs: 50, detectedLocale: 'en' }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  followups.length = 0
+  // Both files change inside one debounce window.
+  writeFileSync(join(dir, 'imports', 'm1.md'), 'M1 updated\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'm2.md'), 'M2 updated\n', 'utf8')
+  await new Promise((resolve) => setTimeout(resolve, 700))
+  assert.equal(followups.length, 1, `one wake for the whole batch, got ${followups.length}`)
+  const text = followups[0]?.content?.[0]?.text ?? ''
+  assert.ok(text.includes('imports/m1.md') && text.includes('imports/m2.md'), `both files are named; got: ${text}`)
+})
+
+await check('a wake for a deleted file says so instead of claiming an injection', async () => {
+  const session = makeSession(root, [])
+  const followups = []
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 50, minReinjectIntervalMs: 50, detectedLocale: 'en' }),
+    session,
+    captureFollowup: (message) => followups.push(message),
+  })
+  followups.length = 0
+  rmSync(join(root, 'imports', 'extra.md'))
+  await waitOut()
+  await waitOut()
+  const text = followups.map((m) => m?.content?.[0]?.text ?? '').join('\n')
+  assert.match(text, /no longer exist/, `a deleted file is reported as gone; got: ${text || '(no wake)'}`)
+  assert.ok(!/latest content is injected/.test(text), `it must not claim an injection; got: ${text}`)
+})
+
+await check('two references on consecutive lines are not a spaced path', async () => {
+  // Regression (found on a real host, 2026-11-24): the spaced-path detector
+  // used `\s` as its separator, which also matches a line break, so
+  // "@a.md\n@b.md" was read as ONE spaced path and line 1 was reported as
+  // "path contains a space" on every injection round.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-lines-'))
+  mkdirSync(join(dir, 'imports', 'nested'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/extra.md\n@imports/nested/deep.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'extra.md'), 'LINE_ONE_MARKER\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'nested', 'deep.md'), 'LINE_TWO_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(dir, []) })
+  assert.equal(injected.length, 1)
+  const text = injected[0]
+  assert.ok(!/space|空格/.test(text), `no spaced-path note may appear; got: ${text.slice(0, 200)}`)
+  // and both references were still followed as real imports
+  assert.match(text, /<file path="imports\/extra\.md">/)
+  assert.match(text, /<file path="imports\/nested\/deep\.md">/)
+})
+
+await check('a reference followed by a dotted version on the next line is not a spaced path', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-lines2-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/extra.md\nrequires v1.2 or later\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'extra.md'), 'VERSIONED_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(dir, []) })
+  const text = injected.join('\n')
+  assert.ok(!/space|空格/.test(text), `no spaced-path note may appear; got: ${text.slice(0, 200)}`)
+})
+await check('a throttled change is delivered when the throttle window OPENS, not a full throttle after it was queued', async () => {
+  // Found on a real host (2026-11-24): a change queued late inside the window
+  // was delivered a FULL throttle after it was queued, i.e. long after the
+  // window had already opened. The pending timer must wait only until the
+  // window opens: (last delivery + throttle) - now.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-pending-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/a.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'a.md'), 'A0\n', 'utf8')
+  const session = makeSession(dir, [])
+  const followups = []
+  const THROTTLE = 600
+  await runPlugin({
+    entry: liveEntry({ watchDebounceMs: 20, minReinjectIntervalMs: THROTTLE }),
+    session,
+    captureFollowup: (message) => followups.push({ t: Date.now(), text: message?.content?.[0]?.text ?? '' }),
+  })
+  followups.length = 0
+  writeFileSync(join(dir, 'imports', 'a.md'), 'A1\n', 'utf8')
+  await new Promise((r) => setTimeout(r, 100))
+  assert.equal(followups.length, 1, 'first change delivered promptly')
+  const firstDelivery = followups[0].t
+  // Queue the second change LATE inside the window: 2/3 of the throttle later.
+  // The window then opens only 1/3 of a throttle after this change.
+  await new Promise((r) => setTimeout(r, Math.round(THROTTLE * 2 / 3) - 100))
+  writeFileSync(join(dir, 'imports', 'a.md'), 'A2\n', 'utf8')
+  await new Promise((r) => setTimeout(r, 100))
+  assert.equal(followups.length, 1, 'not delivered inside the window')
+  // Wait until the window has opened + slack, but NOT a full throttle.
+  const untilWindow = firstDelivery + THROTTLE + 120 - Date.now()
+  if (untilWindow > 0) await new Promise((r) => setTimeout(r, untilWindow))
+  const elapsed = followups.length > 1 ? followups[1].t - firstDelivery : -1
+  assert.equal(followups.length, 2, `must be delivered once the window opens (~${THROTTLE}ms after the first delivery); ` +
+    `got ${followups.length} wakes, second at ${elapsed}ms`)
+  assert.ok(elapsed >= THROTTLE - 40, `never before the window: ${elapsed}ms`)
+  assert.ok(elapsed <= THROTTLE + 250, `soon after the window opens, not a full throttle later: ${elapsed}ms`)
+})
+await check('wake scope: only the session that ran a step LAST is woken (wakeScope=active)', async () => {
+  // Found on a real host (2026-11-24): a tab the user closed kept being woken
+  // and ran full turns in the background. The host gives no "tab closed" or
+  // "archived" signal, so under wakeScope=active only the session that ran a
+  // step last is woken.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-scope-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/shared.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'shared.md'), 'S0\n', 'utf8')
+  const A = makeSession(dir, [])
+  const B = makeSession(dir, [])
+  const wakesA = []
+  const wakesB = []
+  const entry = liveEntry({ watchDebounceMs: 20, minReinjectIntervalMs: 100, wakeScope: 'active' })
+  // A steps first, then B: B is the active session. One plugin instance for both.
+  const run = await runPluginMulti({
+    entry,
+    steps: [
+      { session: A, capture: (m) => wakesA.push(m) },
+      { session: B, capture: (m) => wakesB.push(m) },
+    ],
+  })
+  try {
+    wakesA.length = 0
+    wakesB.length = 0
+    watchFile(join(dir, 'imports', 'shared.md'))
+    await waitOut()
+    assert.equal(wakesB.length, 1, `the active session (B) is woken, got ${wakesB.length}`)
+    assert.equal(wakesA.length, 0, `the inactive session (A) must NOT be woken, got ${wakesA.length}`)
+  } finally {
+    run.dispose()
+  }
+})
+
+await check('wake scope: active follows the latest step (A becomes active again)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-scope3-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/shared.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'shared.md'), 'S0\n', 'utf8')
+  const A = makeSession(dir, [])
+  const B = makeSession(dir, [])
+  const wakesA = []
+  const wakesB = []
+  const entry = liveEntry({ watchDebounceMs: 20, minReinjectIntervalMs: 100, wakeScope: 'active' })
+  // A, then B, then A again: the user went back to A.
+  const run = await runPluginMulti({
+    entry,
+    steps: [
+      { session: A, capture: (m) => wakesA.push(m) },
+      { session: B, capture: (m) => wakesB.push(m) },
+      { session: A, capture: (m) => wakesA.push(m) },
+    ],
+  })
+  try {
+    wakesA.length = 0
+    wakesB.length = 0
+    watchFile(join(dir, 'imports', 'shared.md'))
+    await waitOut()
+    assert.equal(wakesA.length, 1, `A is active again and is woken, got ${wakesA.length}`)
+    assert.equal(wakesB.length, 0, `B is no longer active and must NOT be woken, got ${wakesB.length}`)
+  } finally {
+    run.dispose()
+  }
+})
+await check('wake scope: the default stays "all" so existing behaviour is unchanged', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-scope2-'))
+  mkdirSync(join(dir, 'imports'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@imports/shared.md\n', 'utf8')
+  writeFileSync(join(dir, 'imports', 'shared.md'), 'S0\n', 'utf8')
+  const A = makeSession(dir, [])
+  const B = makeSession(dir, [])
+  const wakesA = []
+  const wakesB = []
+  // no wakeScope given -> default (all)
+  const entry = liveEntry({ watchDebounceMs: 20, minReinjectIntervalMs: 100 })
+  const run = await runPluginMulti({
+    entry,
+    steps: [
+      { session: A, capture: (m) => wakesA.push(m) },
+      { session: B, capture: (m) => wakesB.push(m) },
+    ],
+  })
+  try {
+    wakesA.length = 0
+    wakesB.length = 0
+    watchFile(join(dir, 'imports', 'shared.md'))
+    await waitOut()
+    assert.equal(wakesA.length, 1, `default wakes every referencing session (A), got ${wakesA.length}`)
+    assert.equal(wakesB.length, 1, `default wakes every referencing session (B), got ${wakesB.length}`)
+  } finally {
+    run.dispose()
+  }
+})
+await check('a valid UTF-8 file that contains a literal replacement character is injected', async () => {
+  // Found by adversarial review (2026-11-25): the old decoder sniffed for
+  // U+FFFD to decide "not UTF-8", so a perfectly valid UTF-8 file that merely
+  // CONTAINED a replacement character was rejected with the encoding note.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-fffd-'))
+  // "# 晚上好 \uFFFD\nVALID_FFFD_MARKER\n" — valid UTF-8 bytes, one legit U+FFFD inside.
+  const raw = Buffer.concat([Buffer.from('# \u665a\u4e0a\u597d ', 'utf8'), Buffer.from([0xef, 0xbf, 0xbd]), Buffer.from('\nVALID_FFFD_MARKER\n', 'utf8')])
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\n@legit.md\n', 'utf8')
+  writeFileSync(join(dir, 'legit.md'), raw)
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(dir, []) })
+  assert.equal(injected.length, 1)
+  const text = injected[0]
+  assert.ok(!/UTF-8|无法解码/.test(text), `no encoding note may appear; got: ${text.slice(0, 200)}`)
+  assert.match(text, /VALID_FFFD_MARKER/, 'the file content must be injected')
+})
+
+await check('a quoted word ending the previous line does not silence the next spaced reference', async () => {
+  // Found by adversarial review (2026-11-25): the spaced-ref reporter skipped
+  // whenever a double quote appeared within 2 characters BEFORE the @, and
+  // that window reached across the line break, so the reference after a line
+  // ending in a quoted word was silently dropped.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-ci-quote-'))
+  mkdirSync(join(dir, 'my docs'), { recursive: true })
+  writeFileSync(join(dir, 'AGENTS.md'), '# root\n\nsee "术语" below\n@my docs/plan.md\n', 'utf8')
+  writeFileSync(join(dir, 'my docs', 'plan.md'), 'QUOTED_PREV_MARKER\n', 'utf8')
+  const { injected } = await runPlugin({ entry: defaultEntry, session: makeSession(dir, []) })
+  assert.equal(injected.length, 1)
+  const text = injected[0]
+  assert.match(text, /space|空格/, `the spaced reference must still be reported; got: ${text.slice(0, 220)}`)
+})
 await check('liveMode=off keeps 0.3.1 behaviour: injection but no wake', async () => {
   const session = makeSession(root, [])
   const followups = []

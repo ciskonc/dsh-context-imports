@@ -38,6 +38,7 @@ export interface ContextImportsCardState {
   scanImports: FieldState
   expandLoadedInstructions: FieldState
   liveMode: FieldState
+  wakeScope: FieldState
   watchDebounceMs: FieldState
   minReinjectIntervalMs: FieldState
   instructionFiles: FieldState
@@ -53,6 +54,8 @@ export const SOURCES = ['startup', 'resume', 'clear', 'compact'] as const
 
 /** liveMode 的合法取值（与 host 端一致）。 */
 export const LIVE_MODES = ['off', 'inject', 'inject+wake'] as const
+/** Which sessions a file change may wake; must match the host config union. */
+export const WAKE_SCOPES = ['all', 'active'] as const
 
 /** SettingsForm 框架的文案（从本页字典读）。 */
 function formLabels(t: Translate) {
@@ -96,6 +99,8 @@ function TokensField(props: {
   disabled: boolean
   tokens: readonly string[]
   tokenLabel: (token: string) => string
+  /** Short marker saying several options may apply. */
+  choiceMarker?: string
   onEdit: (text: string) => void
 }) {
   const selected = new Set(props.state.text.split(/[,\s]+/).filter((token) => token !== ''))
@@ -107,7 +112,14 @@ function TokensField(props: {
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' }}>
-      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>{props.label}</span>
+      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+        {props.label}
+        {props.choiceMarker !== undefined && (
+          <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)', border: '1px solid var(--dsw-alias-settings-card-stroke)', borderRadius: 4, padding: '0 5px' }}>
+            {props.choiceMarker}
+          </span>
+        )}
+      </span>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px' }}>
         {props.tokens.map((token) => (
           <Checkbox
@@ -134,26 +146,45 @@ function RadioField(props: {
   disabled: boolean
   options: readonly string[]
   optionLabel: (option: string) => string
+  /** One line under each option saying what that choice does. */
+  optionHint?: (option: string) => string
+  /** Short marker saying only one option applies. */
+  choiceMarker?: string
   onEdit: (text: string) => void
 }) {
   const current = props.state.text.trim()
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' }}>
-      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsh-alias-label-primary)' }}>{props.label}</span>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 16px' }}>
+      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+        {props.label}
+        {props.choiceMarker !== undefined && (
+          <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 400, color: 'var(--dsw-alias-label-tertiary)', border: '1px solid var(--dsw-alias-settings-card-stroke)', borderRadius: 4, padding: '0 5px' }}>
+            {props.choiceMarker}
+          </span>
+        )}
+      </span>
+      {/* One option per row: each choice needs room for the sentence that
+          separates it from the others. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {props.options.map((option) => (
-          <Checkbox
-            key={option}
-            checked={current === option}
-            disabled={props.disabled}
-            label={props.optionLabel(option)}
-            onChange={(next) => {
-              if (next) props.onEdit(option)
-            }}
-          />
+          <div key={option} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <Checkbox
+              checked={current === option}
+              disabled={props.disabled}
+              label={props.optionLabel(option)}
+              onChange={(next) => {
+                if (next) props.onEdit(option)
+              }}
+            />
+            {props.optionHint !== undefined && (
+              <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', paddingLeft: 24 }}>
+                {props.optionHint(option)}
+              </span>
+            )}
+          </div>
         ))}
       </div>
-      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsh-alias-label-tertiary)' }}>{props.hint}</p>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{props.hint}</p>
     </div>
   )
 }
@@ -174,7 +205,7 @@ function MultilineField(props: {
 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' }}>
-      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsh-alias-label-primary)' }}>{props.label}</span>
+      <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>{props.label}</span>
       <textarea
         id={props.id}
         value={props.state.text}
@@ -184,16 +215,16 @@ function MultilineField(props: {
         style={{
           width: '100%',
           resize: 'vertical',
-          fontFamily: 'var(--dsh-alias-font-mono, monospace)',
+          fontFamily: 'var(--dsw-alias-font-mono, monospace)',
           fontSize: 12,
           padding: 8,
           borderRadius: 6,
-          border: '1px solid var(--dsh-alias-border-default)',
-          background: 'var(--dsh-alias-surface-default)',
-          color: 'var(--dsh-alias-label-primary)',
+          border: '1px solid var(--dsw-alias-settings-card-stroke)',
+          background: 'var(--dsw-alias-settings-card-fill)',
+          color: 'var(--dsw-alias-label-primary)',
         }}
       />
-      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsh-alias-label-tertiary)' }}>{props.hint}</p>
+      <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{props.hint}</p>
     </div>
   )
 }
@@ -245,12 +276,28 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
       <RadioField
         id="plugin-config-context-imports-live-mode"
         label={t('liveMode')}
-        hint={t('liveModeHint')}
+        choiceMarker={t('singleChoice')}
+        hint={t('liveModeHint') + ' ' + t('liveModeDebounceNote')}
         state={state.liveMode}
         disabled={!state.writable}
         options={LIVE_MODES}
         optionLabel={(option) => t(`liveMode_${option.replace('+', '_')}`)}
+        optionHint={(option) =>
+          option === 'off' ? t('liveModeOffHint') : option === 'inject' ? t('liveModeInjectHint') : t('liveModeWakeHint')
+        }
         onEdit={(text) => props.edit('liveMode', text)}
+      />
+      <RadioField
+        id="plugin-config-context-imports-wake-scope"
+        label={t('wakeScope')}
+        hint={t('wakeScopeHint')}
+        state={state.wakeScope}
+        disabled={!state.writable || state.liveMode.text.trim() !== 'inject+wake'}
+        options={WAKE_SCOPES}
+        optionLabel={(option) => t(`wakeScope_${option}`)}
+        optionHint={(option) => (option === 'all' ? t('wakeScopeAllHint') : t('wakeScopeActiveHint'))}
+        choiceMarker={t('singleChoice')}
+        onEdit={(text) => props.edit('wakeScope', text)}
       />
       <SettingsValueField
         numeric
@@ -276,7 +323,7 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
         <MultilineField
           id="plugin-config-context-imports-instruction-files"
           label={t('instructionFiles')}
-          hint={t('instructionFilesHint')}
+          hint={t('instructionFilesHint') + ' ' + t('quotedPathNote')}
           state={state.instructionFiles}
           disabled={!state.writable}
           onEdit={(text) => props.edit('instructionFiles', text)}
@@ -308,7 +355,8 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
       <TokensField
         id="plugin-config-context-imports-inject-on"
         label={t('injectOn')}
-        hint={t('injectOnHint')}
+        choiceMarker={t('multiChoice')}
+        hint={t('injectOnHint') + ' ' + t('injectOnClearNote')}
         state={state.injectOn}
         disabled={!state.writable}
         tokens={SOURCES}
@@ -319,6 +367,8 @@ export function ContextImportsCard(props: ContextImportsCardProps) {
         placeholder={'{{content}}'}
         {...fieldProps('template', 'plugin-config-context-imports-template', t('template'), t('templateHint'), t('invalidNumber'))}
       />
+    <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('unsavedNote')}</p>
+    <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('savedRestartNote')}</p>
     </SettingsForm>
   )
 }
